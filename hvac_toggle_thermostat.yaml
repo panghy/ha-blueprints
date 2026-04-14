@@ -1,0 +1,320 @@
+blueprint:
+  name: HVAC Toggle Thermostat
+  description: >-
+    Thermostat control for rooms with IR-toggle-based HVAC and a BLE Fingerbot
+    press mechanism via an Adaprox gateway. Maintains an internal cooling state
+    boolean, snapshots temperature at toggle time for slow reconciliation, and
+    uses a cooldown timer to prevent rapid cycling.
+  domain: automation
+  source_url: https://github.com/panghy/ha-blueprints/blob/main/hvac_toggle_thermostat.yaml
+  input:
+    room_settings:
+      name: Room Settings
+      description: Core entities for this room's HVAC control.
+      collapsed: false
+      input:
+        temp_sensor:
+          name: Temperature Sensor
+          description: The room temperature sensor entity.
+          selector:
+            entity:
+              filter:
+                - domain: sensor
+                  device_class: temperature
+        target_temp:
+          name: Target Temperature
+          description: An input_number helper that holds the desired room temperature.
+          selector:
+            entity:
+              filter:
+                - domain: input_number
+        cooling_active:
+          name: Cooling Active Boolean
+          description: An input_boolean helper that tracks whether we believe the AC is currently on.
+          selector:
+            entity:
+              filter:
+                - domain: input_boolean
+        temp_at_toggle:
+          name: Temperature at Toggle
+          description: An input_number helper that stores the temperature when the toggle was last pressed.
+          selector:
+            entity:
+              filter:
+                - domain: input_number
+        cooldown_timer:
+          name: Cooldown Timer
+          description: A timer helper used to prevent rapid toggling after a press.
+          selector:
+            entity:
+              filter:
+                - domain: timer
+        hvac_mode_select:
+          name: HVAC Mode Selector
+          description: An input_select that indicates the current house HVAC mode (must include "Cooling").
+          selector:
+            entity:
+              filter:
+                - domain: input_select
+    toggle_hardware:
+      name: Toggle Hardware
+      description: Entities for the physical toggle mechanism (Fingerbot + IR switch).
+      collapsed: false
+      input:
+        fingerbot_switch:
+          name: Fingerbot BLE Switch
+          description: The switch entity that activates the Fingerbot to press the button.
+          selector:
+            entity:
+              filter:
+                - domain: switch
+        ir_toggle_switch:
+          name: IR Toggle Switch
+          description: The switch entity that sends the IR toggle command.
+          selector:
+            entity:
+              filter:
+                - domain: switch
+        gateway_status_sensor:
+          name: Gateway Status Sensor
+          description: >-
+            The Adaprox gateway status sensor used to detect BLE connection
+            readiness (value > 2 means connected).
+          selector:
+            entity:
+              filter:
+                - domain: sensor
+    tuning:
+      name: Tuning Parameters
+      description: Adjust thresholds and timing to suit your room.
+      collapsed: true
+      input:
+        upper_offset:
+          name: Upper Temperature Offset
+          description: >-
+            How many degrees above the target temperature before turning on
+            cooling. For example, 0.3 means cooling turns on at target + 0.3°C.
+          default: 0.3
+          selector:
+            number:
+              min: 0.1
+              max: 2.0
+              step: 0.1
+              unit_of_measurement: "°C"
+        lower_offset:
+          name: Lower Temperature Offset
+          description: >-
+            How many degrees below the target temperature before turning off
+            cooling. For example, 0.2 means cooling turns off at target - 0.2°C.
+          default: 0.2
+          selector:
+            number:
+              min: 0.1
+              max: 2.0
+              step: 0.1
+              unit_of_measurement: "°C"
+        cooldown_minutes:
+          name: Cooldown Duration
+          description: Minutes to wait after pressing the toggle before allowing another press.
+          default: 3
+          selector:
+            number:
+              min: 1
+              max: 15
+              step: 1
+              unit_of_measurement: minutes
+        reconciliation_minutes:
+          name: Reconciliation Wait
+          description: >-
+            Minutes to wait before reconciliation checks if the AC state matches
+            expectations based on temperature change since last toggle.
+          default: 10
+          selector:
+            number:
+              min: 5
+              max: 30
+              step: 1
+              unit_of_measurement: minutes
+        reconciliation_drop:
+          name: Reconciliation Drop Threshold
+          description: >-
+            If cooling_active is off but the temperature has dropped by more than
+            this amount since the last toggle, assume the AC is actually running.
+          default: 1.0
+          selector:
+            number:
+              min: 0.5
+              max: 3.0
+              step: 0.1
+              unit_of_measurement: "°C"
+
+variables:
+  temp_sensor_id: !input temp_sensor
+  target_temp_id: !input target_temp
+  cooling_active_id: !input cooling_active
+  temp_at_toggle_id: !input temp_at_toggle
+  cooldown_timer_id: !input cooldown_timer
+  fingerbot_switch_id: !input fingerbot_switch
+  ir_toggle_switch_id: !input ir_toggle_switch
+  gateway_status_id: !input gateway_status_sensor
+  upper_offset: !input upper_offset
+  lower_offset: !input lower_offset
+  cooldown_minutes: !input cooldown_minutes
+  reconciliation_minutes: !input reconciliation_minutes
+  reconciliation_drop: !input reconciliation_drop
+  current_temp: "{{ states(temp_sensor_id) | float(15) }}"
+  target: "{{ states(target_temp_id) | float(22) }}"
+  toggle_temp: "{{ states(temp_at_toggle_id) | float(15) }}"
+  temp_available: "{{ states(temp_sensor_id) not in ['unknown', 'unavailable'] }}"
+  target_available: "{{ states(target_temp_id) not in ['unknown', 'unavailable'] }}"
+  toggle_temp_available: "{{ states(temp_at_toggle_id) not in ['unknown', 'unavailable'] }}"
+
+triggers:
+  - trigger: time_pattern
+    minutes: /1
+
+conditions:
+  - condition: state
+    entity_id: !input hvac_mode_select
+    state:
+      - Cooling
+  - condition: state
+    entity_id: !input cooldown_timer
+    state: idle
+
+actions:
+  # Reconciliation: we think cooling is on but temp hasn't dropped
+  - if:
+      - condition: state
+        entity_id: !input cooling_active
+        state: "on"
+        for:
+          minutes: !input reconciliation_minutes
+      - condition: template
+        value_template: >-
+          {{ temp_available and toggle_temp_available
+          and current_temp >= toggle_temp }}
+    then:
+      - action: input_boolean.turn_off
+        target:
+          entity_id: !input cooling_active
+      - stop: ""
+
+  # Reconciliation: we think cooling is off but temp dropped significantly
+  - if:
+      - condition: state
+        entity_id: !input cooling_active
+        state: "off"
+        for:
+          minutes: !input reconciliation_minutes
+      - condition: template
+        value_template: >-
+          {{ temp_available and toggle_temp_available
+          and current_temp <= (toggle_temp - reconciliation_drop) }}
+    then:
+      - action: input_boolean.turn_on
+        target:
+          entity_id: !input cooling_active
+      - stop: ""
+
+  # Control: too hot, turn on cooling
+  - if:
+      - condition: template
+        value_template: >-
+          {{ temp_available and target_available
+          and current_temp > (target + upper_offset) }}
+      - condition: state
+        entity_id: !input cooling_active
+        state: "off"
+    then:
+      # Wait for BLE gateway to be connected before pressing
+      - repeat:
+          until:
+            - condition: numeric_state
+              entity_id: !input gateway_status_sensor
+              above: 2
+          sequence:
+            - action: switch.turn_on
+              target:
+                entity_id: !input fingerbot_switch
+            - delay:
+                seconds: 1
+            - action: switch.turn_off
+              target:
+                entity_id: !input fingerbot_switch
+            - delay:
+                seconds: 10
+      # Send IR toggle
+      - action: switch.toggle
+        target:
+          entity_id: !input ir_toggle_switch
+      # Snapshot temperature
+      - action: input_number.set_value
+        target:
+          entity_id: !input temp_at_toggle
+        data:
+          value: "{{ current_temp }}"
+      # Mark cooling as active
+      - action: input_boolean.turn_on
+        target:
+          entity_id: !input cooling_active
+      # Start cooldown
+      - action: timer.start
+        target:
+          entity_id: !input cooldown_timer
+        data:
+          duration:
+            minutes: "{{ cooldown_minutes | int }}"
+      - stop: ""
+
+  # Control: cool enough, turn off cooling
+  - if:
+      - condition: template
+        value_template: >-
+          {{ temp_available and target_available
+          and current_temp < (target - lower_offset) }}
+      - condition: state
+        entity_id: !input cooling_active
+        state: "on"
+    then:
+      # Wait for BLE gateway to be connected before pressing
+      - repeat:
+          until:
+            - condition: numeric_state
+              entity_id: !input gateway_status_sensor
+              above: 2
+          sequence:
+            - action: switch.turn_on
+              target:
+                entity_id: !input fingerbot_switch
+            - delay:
+                seconds: 1
+            - action: switch.turn_off
+              target:
+                entity_id: !input fingerbot_switch
+            - delay:
+                seconds: 10
+      # Send IR toggle
+      - action: switch.toggle
+        target:
+          entity_id: !input ir_toggle_switch
+      # Snapshot temperature
+      - action: input_number.set_value
+        target:
+          entity_id: !input temp_at_toggle
+        data:
+          value: "{{ current_temp }}"
+      # Mark cooling as inactive
+      - action: input_boolean.turn_off
+        target:
+          entity_id: !input cooling_active
+      # Start cooldown
+      - action: timer.start
+        target:
+          entity_id: !input cooldown_timer
+        data:
+          duration:
+            minutes: "{{ cooldown_minutes | int }}"
+      - stop: ""
+
+mode: single

@@ -1,10 +1,11 @@
 blueprint:
   name: HVAC Toggle Thermostat
   description: >-
-    Thermostat control for rooms with IR-toggle-based HVAC and a BLE Fingerbot
-    press mechanism via an Adaprox gateway. Maintains an internal cooling state
-    boolean, snapshots temperature at toggle time for slow reconciliation, and
-    uses a cooldown timer to prevent rapid cycling.
+    Thermostat control for rooms with a physical toggle-based HVAC system using
+    a Fingerbot (via Adaprox BLE gateway) to press the AC remote's power button.
+    Maintains an internal cooling state boolean, snapshots temperature at toggle
+    time for slow reconciliation, and uses a cooldown timer to prevent rapid
+    cycling.
   domain: automation
   source_url: https://github.com/panghy/ha-blueprints/blob/main/hvac_toggle_thermostat.yaml
   input:
@@ -56,30 +57,37 @@ blueprint:
             entity:
               filter:
                 - domain: input_select
-    toggle_hardware:
-      name: Toggle Hardware
-      description: Entities for the physical toggle mechanism (Fingerbot + IR switch).
+    adaprox_gateway:
+      name: Adaprox Gateway
+      description: >-
+        Entities from the Adaprox BLE gateway that controls the Fingerbot.
+        The gateway exposes three entities: Connect (BLE connection switch),
+        Switch (Fingerbot toggle command), and Status (connection state sensor).
       collapsed: false
       input:
-        fingerbot_switch:
-          name: Fingerbot BLE Switch
-          description: The switch entity that activates the Fingerbot to press the button.
-          selector:
-            entity:
-              filter:
-                - domain: switch
-        ir_toggle_switch:
-          name: IR Toggle Switch
-          description: The switch entity that sends the IR toggle command.
-          selector:
-            entity:
-              filter:
-                - domain: switch
-        gateway_status_sensor:
-          name: Gateway Status Sensor
+        gateway_connect:
+          name: Gateway Connect
           description: >-
-            The Adaprox gateway status sensor used to detect BLE connection
-            readiness (value > 2 means connected).
+            The Adaprox gateway's "Connect" switch entity. This is toggled to
+            wake up the BLE connection to the Fingerbot.
+          selector:
+            entity:
+              filter:
+                - domain: switch
+        gateway_switch:
+          name: Gateway Switch
+          description: >-
+            The Adaprox gateway's "Switch" entity. This sends the actual toggle
+            command to the Fingerbot to press the AC power button.
+          selector:
+            entity:
+              filter:
+                - domain: switch
+        gateway_status:
+          name: Gateway Status
+          description: >-
+            The Adaprox gateway's "Status" sensor entity. A value above 2
+            indicates the BLE connection is established and ready for commands.
           selector:
             entity:
               filter:
@@ -154,9 +162,9 @@ variables:
   cooling_active_id: !input cooling_active
   temp_at_toggle_id: !input temp_at_toggle
   cooldown_timer_id: !input cooldown_timer
-  fingerbot_switch_id: !input fingerbot_switch
-  ir_toggle_switch_id: !input ir_toggle_switch
-  gateway_status_id: !input gateway_status_sensor
+  gateway_connect_id: !input gateway_connect
+  gateway_switch_id: !input gateway_switch
+  gateway_status_id: !input gateway_status
   upper_offset: !input upper_offset
   lower_offset: !input lower_offset
   cooldown_minutes: !input cooldown_minutes
@@ -231,23 +239,23 @@ actions:
       - repeat:
           until:
             - condition: numeric_state
-              entity_id: !input gateway_status_sensor
+              entity_id: !input gateway_status
               above: 2
           sequence:
             - action: switch.turn_on
               target:
-                entity_id: !input fingerbot_switch
+                entity_id: !input gateway_connect
             - delay:
                 seconds: 1
             - action: switch.turn_off
               target:
-                entity_id: !input fingerbot_switch
+                entity_id: !input gateway_connect
             - delay:
                 seconds: 10
-      # Send IR toggle
+      # Press the AC power button via Fingerbot
       - action: switch.toggle
         target:
-          entity_id: !input ir_toggle_switch
+          entity_id: !input gateway_switch
       # Snapshot temperature
       - action: input_number.set_value
         target:
@@ -281,23 +289,23 @@ actions:
       - repeat:
           until:
             - condition: numeric_state
-              entity_id: !input gateway_status_sensor
+              entity_id: !input gateway_status
               above: 2
           sequence:
             - action: switch.turn_on
               target:
-                entity_id: !input fingerbot_switch
+                entity_id: !input gateway_connect
             - delay:
                 seconds: 1
             - action: switch.turn_off
               target:
-                entity_id: !input fingerbot_switch
+                entity_id: !input gateway_connect
             - delay:
                 seconds: 10
-      # Send IR toggle
+      # Press the AC power button via Fingerbot
       - action: switch.toggle
         target:
-          entity_id: !input ir_toggle_switch
+          entity_id: !input gateway_switch
       # Snapshot temperature
       - action: input_number.set_value
         target:

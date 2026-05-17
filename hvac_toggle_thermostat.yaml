@@ -325,4 +325,4 @@ actions:
             minutes: "{{ cooldown_minutes | int }}"
       - stop: ""
 
-mode: single
+mode: restart

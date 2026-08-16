@@ -66,10 +66,11 @@ blueprint:
       collapsed: false
       input:
         gateway_connect:
-          name: Gateway Connect
+          name: Gateway Connect (deprecated)
           description: >-
-            The Adaprox gateway's "Connect" switch entity. This is toggled to
-            wake up the BLE connection to the Fingerbot.
+            DEPRECATED — no longer used. The blueprint now toggles the gateway
+            switch directly without a BLE connect step. Kept only so existing
+            automations that still supply this input keep validating.
           selector:
             entity:
               filter:
@@ -84,10 +85,11 @@ blueprint:
               filter:
                 - domain: switch
         gateway_status:
-          name: Gateway Status
+          name: Gateway Status (deprecated)
           description: >-
-            The Adaprox gateway's "Status" sensor entity. A value above 2
-            indicates the BLE connection is established and ready for commands.
+            DEPRECATED — no longer used. The blueprint now toggles the gateway
+            switch directly without waiting on connection status. Kept only so
+            existing automations that still supply this input keep validating.
           selector:
             entity:
               filter:
@@ -235,23 +237,6 @@ actions:
         entity_id: !input cooling_active
         state: "off"
     then:
-      # Wait for BLE gateway to be connected before pressing
-      - repeat:
-          until:
-            - condition: numeric_state
-              entity_id: !input gateway_status
-              above: 2
-          sequence:
-            - action: switch.turn_on
-              target:
-                entity_id: !input gateway_connect
-            - delay:
-                seconds: 1
-            - action: switch.turn_off
-              target:
-                entity_id: !input gateway_connect
-            - delay:
-                seconds: 10
       # Press the AC power button via Fingerbot
       - action: switch.toggle
         target:
@@ -285,23 +270,6 @@ actions:
         entity_id: !input cooling_active
         state: "on"
     then:
-      # Wait for BLE gateway to be connected before pressing
-      - repeat:
-          until:
-            - condition: numeric_state
-              entity_id: !input gateway_status
-              above: 2
-          sequence:
-            - action: switch.turn_on
-              target:
-                entity_id: !input gateway_connect
-            - delay:
-                seconds: 1
-            - action: switch.turn_off
-              target:
-                entity_id: !input gateway_connect
-            - delay:
-                seconds: 10
       # Press the AC power button via Fingerbot
       - action: switch.toggle
         target:

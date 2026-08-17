@@ -5,7 +5,8 @@ blueprint:
     a Fingerbot (via Adaprox BLE gateway) to press the AC remote's power button.
     Maintains an internal cooling state boolean, snapshots temperature at toggle
     time for slow reconciliation, and uses a cooldown timer to prevent rapid
-    cycling.
+    cycling. Each press is verified against the gateway status sensor's
+    feedback blip and retried once if it did not land.
   domain: automation
   source_url: https://github.com/panghy/ha-blueprints/blob/main/hvac_toggle_thermostat.yaml
   input:
@@ -61,8 +62,9 @@ blueprint:
       name: Adaprox Gateway
       description: >-
         Entities from the Adaprox BLE gateway that controls the Fingerbot.
-        The gateway exposes three entities: Connect (BLE connection switch),
-        Switch (Fingerbot toggle command), and Status (connection state sensor).
+        The gateway exposes per-slot entities: Connect (BLE connection switch,
+        deprecated here), Switch (Fingerbot toggle command), and Status (the
+        slot's press-feedback sensor, used to verify presses).
       collapsed: false
       input:
         gateway_connect:
@@ -85,11 +87,15 @@ blueprint:
               filter:
                 - domain: switch
         gateway_status:
-          name: Gateway Status (deprecated)
+          name: Gateway Status
           description: >-
-            DEPRECATED — no longer used. The blueprint now toggles the gateway
-            switch directly without waiting on connection status. Kept only so
-            existing automations that still supply this input keep validating.
+            The Adaprox gateway's "Status" sensor for this Fingerbot's slot.
+            Used to verify a press physically landed: a successful press makes
+            this sensor blip from '01' to a hex feedback string (e.g.
+            '0500010154000300') within ~20 seconds. If no blip is seen the
+            press is retried once. Must be the Status sensor for this
+            Fingerbot's own slot — a shared or gateway-level sensor would
+            cross-confirm other slots' presses.
           selector:
             entity:
               filter:
@@ -241,23 +247,62 @@ actions:
       - action: switch.toggle
         target:
           entity_id: !input gateway_switch
-      # Snapshot temperature
-      - action: input_number.set_value
-        target:
-          entity_id: !input temp_at_toggle
-        data:
-          value: "{{ current_temp }}"
-      # Mark cooling as active
-      - action: input_boolean.turn_on
-        target:
-          entity_id: !input cooling_active
-      # Start cooldown
+      # Start cooldown immediately: the idle-cooldown condition must block
+      # the next 1-minute trigger from restarting us mid-verification
       - action: timer.start
         target:
           entity_id: !input cooldown_timer
         data:
           duration:
             minutes: "{{ cooldown_minutes | int }}"
+      # Verify the press landed: the gateway status sensor blips to a hex
+      # feedback string (non-'01'/'00') within ~20s of a physical press.
+      # wait_template rather than a state trigger: it is evaluated on entry,
+      # so a blip landing in the toggle->wait gap still counts
+      - wait_template: >-
+          {{ states(gateway_status_id)
+          not in ['01', '00', 'unknown', 'unavailable'] }}
+        timeout:
+          seconds: 20
+        continue_on_timeout: true
+      - if:
+          - condition: template
+            value_template: "{{ not wait.completed }}"
+        then:
+          # No feedback blip: re-press once, then wait again
+          - action: switch.toggle
+            target:
+              entity_id: !input gateway_switch
+          - wait_template: >-
+              {{ states(gateway_status_id)
+              not in ['01', '00', 'unknown', 'unavailable'] }}
+            timeout:
+              seconds: 20
+            continue_on_timeout: true
+          - if:
+              - condition: template
+                value_template: "{{ not wait.completed }}"
+            then:
+              # Second press also unconfirmed: give up (no loop) and leave the
+              # belief state untouched so reconciliation can correct it later
+              - action: persistent_notification.create
+                data:
+                  notification_id: "hvac_press_failed_{{ this.entity_id }}"
+                  title: HVAC press not confirmed
+                  message: >-
+                    {{ this.attributes.friendly_name }}: no gateway status
+                    feedback after two press attempts. Belief state left
+                    unchanged; check the Fingerbot/gateway.
+              - stop: Press unconfirmed after retry
+      # Confirmed press: snapshot temperature and mark cooling as active
+      - action: input_number.set_value
+        target:
+          entity_id: !input temp_at_toggle
+        data:
+          value: "{{ current_temp }}"
+      - action: input_boolean.turn_on
+        target:
+          entity_id: !input cooling_active
       - stop: ""
 
   # Control: cool enough, turn off cooling
@@ -274,23 +319,62 @@ actions:
       - action: switch.toggle
         target:
           entity_id: !input gateway_switch
-      # Snapshot temperature
-      - action: input_number.set_value
-        target:
-          entity_id: !input temp_at_toggle
-        data:
-          value: "{{ current_temp }}"
-      # Mark cooling as inactive
-      - action: input_boolean.turn_off
-        target:
-          entity_id: !input cooling_active
-      # Start cooldown
+      # Start cooldown immediately: the idle-cooldown condition must block
+      # the next 1-minute trigger from restarting us mid-verification
       - action: timer.start
         target:
           entity_id: !input cooldown_timer
         data:
           duration:
             minutes: "{{ cooldown_minutes | int }}"
+      # Verify the press landed: the gateway status sensor blips to a hex
+      # feedback string (non-'01'/'00') within ~20s of a physical press.
+      # wait_template rather than a state trigger: it is evaluated on entry,
+      # so a blip landing in the toggle->wait gap still counts
+      - wait_template: >-
+          {{ states(gateway_status_id)
+          not in ['01', '00', 'unknown', 'unavailable'] }}
+        timeout:
+          seconds: 20
+        continue_on_timeout: true
+      - if:
+          - condition: template
+            value_template: "{{ not wait.completed }}"
+        then:
+          # No feedback blip: re-press once, then wait again
+          - action: switch.toggle
+            target:
+              entity_id: !input gateway_switch
+          - wait_template: >-
+              {{ states(gateway_status_id)
+              not in ['01', '00', 'unknown', 'unavailable'] }}
+            timeout:
+              seconds: 20
+            continue_on_timeout: true
+          - if:
+              - condition: template
+                value_template: "{{ not wait.completed }}"
+            then:
+              # Second press also unconfirmed: give up (no loop) and leave the
+              # belief state untouched so reconciliation can correct it later
+              - action: persistent_notification.create
+                data:
+                  notification_id: "hvac_press_failed_{{ this.entity_id }}"
+                  title: HVAC press not confirmed
+                  message: >-
+                    {{ this.attributes.friendly_name }}: no gateway status
+                    feedback after two press attempts. Belief state left
+                    unchanged; check the Fingerbot/gateway.
+              - stop: Press unconfirmed after retry
+      # Confirmed press: snapshot temperature and mark cooling as inactive
+      - action: input_number.set_value
+        target:
+          entity_id: !input temp_at_toggle
+        data:
+          value: "{{ current_temp }}"
+      - action: input_boolean.turn_off
+        target:
+          entity_id: !input cooling_active
       - stop: ""
 
 mode: restart

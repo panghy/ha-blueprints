@@ -256,14 +256,18 @@ actions:
           duration:
             minutes: "{{ cooldown_minutes | int }}"
       # Verify the press landed: the gateway status sensor blips to a hex
-      # feedback string (non-'01'/'00') within ~20s of a physical press.
+      # feedback string (non-'01'/'00') after a physical press. Observed blip
+      # latency ranges 6s to ~70s (the gateway can deliver a queued BLE press
+      # that late), so the wait must be 90s: a shorter window produces false
+      # -negative retries whose queued second press lands late and double
+      # -toggles the AC.
       # wait_template rather than a state trigger: it is evaluated on entry,
       # so a blip landing in the toggle->wait gap still counts
       - wait_template: >-
           {{ states(gateway_status_id)
           not in ['01', '00', 'unknown', 'unavailable'] }}
         timeout:
-          seconds: 20
+          seconds: 90
         continue_on_timeout: true
       - if:
           - condition: template
@@ -277,7 +281,7 @@ actions:
               {{ states(gateway_status_id)
               not in ['01', '00', 'unknown', 'unavailable'] }}
             timeout:
-              seconds: 20
+              seconds: 90
             continue_on_timeout: true
           - if:
               - condition: template
@@ -328,14 +332,18 @@ actions:
           duration:
             minutes: "{{ cooldown_minutes | int }}"
       # Verify the press landed: the gateway status sensor blips to a hex
-      # feedback string (non-'01'/'00') within ~20s of a physical press.
+      # feedback string (non-'01'/'00') after a physical press. Observed blip
+      # latency ranges 6s to ~70s (the gateway can deliver a queued BLE press
+      # that late), so the wait must be 90s: a shorter window produces false
+      # -negative retries whose queued second press lands late and double
+      # -toggles the AC.
       # wait_template rather than a state trigger: it is evaluated on entry,
       # so a blip landing in the toggle->wait gap still counts
       - wait_template: >-
           {{ states(gateway_status_id)
           not in ['01', '00', 'unknown', 'unavailable'] }}
         timeout:
-          seconds: 20
+          seconds: 90
         continue_on_timeout: true
       - if:
           - condition: template
@@ -349,7 +357,7 @@ actions:
               {{ states(gateway_status_id)
               not in ['01', '00', 'unknown', 'unavailable'] }}
             timeout:
-              seconds: 20
+              seconds: 90
             continue_on_timeout: true
           - if:
               - condition: template

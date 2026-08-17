@@ -62,8 +62,9 @@ blueprint:
       name: Adaprox Gateway
       description: >-
         Entities from the Adaprox BLE gateway that controls the Fingerbot.
-        The gateway exposes three entities: Connect (BLE connection switch),
-        Switch (Fingerbot toggle command), and Status (connection state sensor).
+        The gateway exposes per-slot entities: Connect (BLE connection switch,
+        deprecated here), Switch (Fingerbot toggle command), and Status (the
+        slot's press-feedback sensor, used to verify presses).
       collapsed: false
       input:
         gateway_connect:
@@ -92,7 +93,9 @@ blueprint:
             Used to verify a press physically landed: a successful press makes
             this sensor blip from '01' to a hex feedback string (e.g.
             '0500010154000300') within ~20 seconds. If no blip is seen the
-            press is retried once.
+            press is retried once. Must be the Status sensor for this
+            Fingerbot's own slot — a shared or gateway-level sensor would
+            cross-confirm other slots' presses.
           selector:
             entity:
               filter:
@@ -253,40 +256,32 @@ actions:
           duration:
             minutes: "{{ cooldown_minutes | int }}"
       # Verify the press landed: the gateway status sensor blips to a hex
-      # feedback string (non-'01'/'00') within ~20s of a physical press
-      - wait_for_trigger:
-          - trigger: state
-            entity_id: !input gateway_status
-            not_to:
-              - "01"
-              - "00"
-              - unknown
-              - unavailable
+      # feedback string (non-'01'/'00') within ~20s of a physical press.
+      # wait_template rather than a state trigger: it is evaluated on entry,
+      # so a blip landing in the toggle->wait gap still counts
+      - wait_template: >-
+          {{ states(gateway_status_id)
+          not in ['01', '00', 'unknown', 'unavailable'] }}
         timeout:
           seconds: 20
         continue_on_timeout: true
       - if:
           - condition: template
-            value_template: "{{ wait.trigger is none }}"
+            value_template: "{{ not wait.completed }}"
         then:
           # No feedback blip: re-press once, then wait again
           - action: switch.toggle
             target:
               entity_id: !input gateway_switch
-          - wait_for_trigger:
-              - trigger: state
-                entity_id: !input gateway_status
-                not_to:
-                  - "01"
-                  - "00"
-                  - unknown
-                  - unavailable
+          - wait_template: >-
+              {{ states(gateway_status_id)
+              not in ['01', '00', 'unknown', 'unavailable'] }}
             timeout:
               seconds: 20
             continue_on_timeout: true
           - if:
               - condition: template
-                value_template: "{{ wait.trigger is none }}"
+                value_template: "{{ not wait.completed }}"
             then:
               # Second press also unconfirmed: give up (no loop) and leave the
               # belief state untouched so reconciliation can correct it later
@@ -333,40 +328,32 @@ actions:
           duration:
             minutes: "{{ cooldown_minutes | int }}"
       # Verify the press landed: the gateway status sensor blips to a hex
-      # feedback string (non-'01'/'00') within ~20s of a physical press
-      - wait_for_trigger:
-          - trigger: state
-            entity_id: !input gateway_status
-            not_to:
-              - "01"
-              - "00"
-              - unknown
-              - unavailable
+      # feedback string (non-'01'/'00') within ~20s of a physical press.
+      # wait_template rather than a state trigger: it is evaluated on entry,
+      # so a blip landing in the toggle->wait gap still counts
+      - wait_template: >-
+          {{ states(gateway_status_id)
+          not in ['01', '00', 'unknown', 'unavailable'] }}
         timeout:
           seconds: 20
         continue_on_timeout: true
       - if:
           - condition: template
-            value_template: "{{ wait.trigger is none }}"
+            value_template: "{{ not wait.completed }}"
         then:
           # No feedback blip: re-press once, then wait again
           - action: switch.toggle
             target:
               entity_id: !input gateway_switch
-          - wait_for_trigger:
-              - trigger: state
-                entity_id: !input gateway_status
-                not_to:
-                  - "01"
-                  - "00"
-                  - unknown
-                  - unavailable
+          - wait_template: >-
+              {{ states(gateway_status_id)
+              not in ['01', '00', 'unknown', 'unavailable'] }}
             timeout:
               seconds: 20
             continue_on_timeout: true
           - if:
               - condition: template
-                value_template: "{{ wait.trigger is none }}"
+                value_template: "{{ not wait.completed }}"
             then:
               # Second press also unconfirmed: give up (no loop) and leave the
               # belief state untouched so reconciliation can correct it later

@@ -2,14 +2,19 @@ blueprint:
   name: HVAC Drift Watchdog
   description: >-
     Detects the "impossible unless desynced" signature: the belief state says
-    cooling is OFF while the room temperature sits well BELOW target and is
-    not recovering — in a Hong Kong summer a room does not stay 1°C+ below
-    target for 20 minutes without active cooling. This is exactly the state
-    that froze the nursery for 4 hours (belief off, AC physically on, loop
-    unable to recover because it never presses when it believes cooling is
-    off). Fires a persistent notification plus a phone notification so a
-    human can reconcile the room; throttles itself via a repeat-notify
-    window to avoid spamming.
+    cooling is OFF while the room temperature is low enough to be explainable
+    only by a stuck-on AC and is not recovering. All the wall AC units are
+    set to 20°C, so a genuinely stuck-on AC drags the room toward ~20°C or
+    below (every observed real desync pinned the room at 18-21.5°C); a room
+    resting at 23°C under a raised setpoint is physically incompatible with
+    a stuck-on AC and must never alert. Three gates must all pass:
+    (1) temp >= drift_threshold below target, (2) temp at or below
+    stuck_on_ceiling (just above the ACs' own setpoint), and (3) temp not
+    rising per the trend sensor — a stuck-on AC holds the room flat or
+    falling, while a merely-cool room in a Hong Kong summer drifts upward.
+    Fires a persistent notification plus a phone notification so a human can
+    reconcile the room; throttles itself via a repeat-notify window to avoid
+    spamming.
   domain: automation
   source_url: https://github.com/panghy/ha-blueprints/blob/main/hvac_drift_watchdog.yaml
   input:
@@ -59,6 +64,37 @@ blueprint:
           max: 3.0
           step: 0.1
           unit_of_measurement: "°C"
+    stuck_on_ceiling:
+      name: Stuck-On Temperature Ceiling
+      description: >-
+        Absolute room temperature (°C) at or below which a stuck-on AC is a
+        plausible explanation. The wall AC units are set to 20°C, so a
+        stuck-on AC drags the room toward ~20°C; every observed real desync
+        pinned the room at 18-21.5°C. A room above this ceiling (e.g. 23°C
+        under a raised setpoint) cannot be explained by a stuck-on AC and
+        never alerts, regardless of how far below target it sits.
+      default: 21.5
+      selector:
+        number:
+          min: 20.0
+          max: 24.0
+          step: 0.1
+          unit_of_measurement: "°C"
+    temp_trend:
+      name: Temperature Rising Trend Sensor
+      description: >-
+        A Trend helper binary_sensor over the room temperature sensor
+        (recommended: sample_duration 1800s, min_gradient ~0.0001°C/s) that
+        reads "on" while the temperature is rising. The watchdog only alerts
+        while this sensor is "off": a stuck-on AC holds the room flat or
+        falling, while a merely-cool room in a Hong Kong summer drifts
+        upward. If the trend sensor is unknown/unavailable the alert is
+        suppressed (fail-quiet; real desyncs last hours, so a settled trend
+        sensor will still catch them).
+      selector:
+        entity:
+          filter:
+            - domain: binary_sensor
     drift_minutes:
       name: Drift Duration
       description: >-
@@ -96,6 +132,8 @@ variables:
   cooling_active_id: !input cooling_active
   room_name: !input room_name
   drift_threshold: !input drift_threshold
+  stuck_on_ceiling: !input stuck_on_ceiling
+  temp_trend_id: !input temp_trend
   renotify_minutes: !input renotify_minutes
   notify_service: !input notify_service
   current_temp: "{{ states(temp_sensor_id) | float(99) }}"
@@ -124,6 +162,19 @@ conditions:
     value_template: >-
       {{ temp_available and target_available
       and current_temp <= (target - drift_threshold) }}
+  # ...AND the room is cold enough for a stuck-on AC to be the explanation.
+  # The wall units are set to 20°C: real desyncs pin the room at 18-21.5°C.
+  # A room at 23°C under a raised setpoint (e.g. target 24/25) is below
+  # target but physically incompatible with a stuck-on AC — never alert.
+  - condition: template
+    value_template: "{{ current_temp <= (stuck_on_ceiling | float) }}"
+  # ...AND the temperature is not rising. A stuck-on AC holds the room flat
+  # or falling; a merely-cool room in August drifts upward. Trend sensor
+  # unknown/unavailable suppresses the alert (fail-quiet: real desyncs last
+  # hours, a settled trend sensor still catches them).
+  - condition: state
+    entity_id: !input temp_trend
+    state: "off"
   # Throttle: skip if this automation alerted recently.
   - condition: template
     value_template: >-

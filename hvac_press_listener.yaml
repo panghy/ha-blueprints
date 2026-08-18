@@ -67,14 +67,26 @@ triggers:
     entity_id: !input gateway_status
 
 conditions:
-  # A press is the transition idle -> '0500...'. The second value of a blip
-  # pair (from another '0500...') and '00'<->'01' idle flapping never match.
+  # A press is the transition idle -> '0500...', or '0500...' -> '0500...'
+  # when the previous blip value is stale (>2s old): one physical press
+  # emits a pair of 0500 values 25-400ms apart, so a >2s gap means a
+  # distinct press whose blip window abuts the previous one (queued
+  # delivery). unknown/unavailable are deliberately NOT idle: a gateway
+  # drop/restore around a lingering 0500 value would otherwise book a
+  # phantom press; a blip genuinely lost in an availability gap is instead
+  # recovered by reconciliation + the drift watchdog. '00'<->'01' idle
+  # flapping never matches.
   - condition: template
     value_template: >-
       {{ trigger.to_state is not none
       and trigger.from_state is not none
       and trigger.to_state.state.startswith('0500')
-      and trigger.from_state.state in ['01', '00', 'unknown', 'unavailable'] }}
+      and (
+        trigger.from_state.state in ['01', '00']
+        or (trigger.from_state.state.startswith('0500')
+            and (trigger.to_state.last_changed
+                 - trigger.from_state.last_changed).total_seconds() > 2)
+      ) }}
 
 actions:
   # Snapshot first, then toggle: reconciliation compares against the

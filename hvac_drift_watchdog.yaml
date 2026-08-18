@@ -1,0 +1,156 @@
+blueprint:
+  name: HVAC Drift Watchdog
+  description: >-
+    Detects the "impossible unless desynced" signature: the belief state says
+    cooling is OFF while the room temperature sits well BELOW target and is
+    not recovering — in a Hong Kong summer a room does not stay 1°C+ below
+    target for 20 minutes without active cooling. This is exactly the state
+    that froze the nursery for 4 hours (belief off, AC physically on, loop
+    unable to recover because it never presses when it believes cooling is
+    off). Fires a persistent notification plus a phone notification so a
+    human can reconcile the room; throttles itself via a repeat-notify
+    window to avoid spamming.
+  domain: automation
+  source_url: https://github.com/panghy/ha-blueprints/blob/main/hvac_drift_watchdog.yaml
+  input:
+    temp_sensor:
+      name: Temperature Sensor
+      description: The room temperature sensor entity.
+      selector:
+        entity:
+          filter:
+            - domain: sensor
+              device_class: temperature
+    target_temp:
+      name: Target Temperature
+      description: The input_number holding the desired room temperature.
+      selector:
+        entity:
+          filter:
+            - domain: input_number
+    cooling_active:
+      name: Cooling Active Boolean
+      description: The input_boolean tracking whether we believe the AC is on.
+      selector:
+        entity:
+          filter:
+            - domain: input_boolean
+    hvac_mode_select:
+      name: HVAC Mode Selector
+      description: The input_select for house HVAC mode (must include "Cooling").
+      selector:
+        entity:
+          filter:
+            - domain: input_select
+    room_name:
+      name: Room Name
+      description: Human-readable room name used in notifications.
+      selector:
+        text:
+    drift_threshold:
+      name: Drift Threshold
+      description: >-
+        How far below target (°C) the room must be for the drift to count
+        as impossible-without-cooling.
+      default: 1.0
+      selector:
+        number:
+          min: 0.5
+          max: 3.0
+          step: 0.1
+          unit_of_measurement: "°C"
+    drift_minutes:
+      name: Drift Duration
+      description: >-
+        How long (minutes) cooling_active must have been off while the room
+        stays below target before alerting.
+      default: 20
+      selector:
+        number:
+          min: 10
+          max: 60
+          step: 5
+          unit_of_measurement: minutes
+    renotify_minutes:
+      name: Re-notify Interval
+      description: Minimum minutes between repeat alerts for the same drift.
+      default: 60
+      selector:
+        number:
+          min: 15
+          max: 240
+          step: 15
+          unit_of_measurement: minutes
+    notify_service:
+      name: Phone Notify Service
+      description: >-
+        The notify service name for the phone alert (e.g.
+        notify.mobile_app_clements_iphone). The "notify." prefix is required.
+      default: notify.mobile_app_clements_iphone
+      selector:
+        text:
+
+variables:
+  temp_sensor_id: !input temp_sensor
+  target_temp_id: !input target_temp
+  cooling_active_id: !input cooling_active
+  room_name: !input room_name
+  drift_threshold: !input drift_threshold
+  renotify_minutes: !input renotify_minutes
+  notify_service: !input notify_service
+  current_temp: "{{ states(temp_sensor_id) | float(99) }}"
+  target: "{{ states(target_temp_id) | float(0) }}"
+  temp_available: "{{ states(temp_sensor_id) not in ['unknown', 'unavailable'] }}"
+  target_available: "{{ states(target_temp_id) not in ['unknown', 'unavailable'] }}"
+
+triggers:
+  - trigger: time_pattern
+    minutes: /5
+
+conditions:
+  - condition: state
+    entity_id: !input hvac_mode_select
+    state:
+      - Cooling
+  # Belief has said "off" for the whole drift window...
+  - condition: state
+    entity_id: !input cooling_active
+    state: "off"
+    for:
+      minutes: !input drift_minutes
+  # ...yet the room is pinned well below target: impossible in summer
+  # without active cooling.
+  - condition: template
+    value_template: >-
+      {{ temp_available and target_available
+      and current_temp <= (target - drift_threshold) }}
+  # Throttle: skip if this automation alerted recently.
+  - condition: template
+    value_template: >-
+      {{ this.attributes.last_triggered is none
+      or (now() - this.attributes.last_triggered).total_seconds()
+      > (renotify_minutes | float * 60) }}
+
+actions:
+  - action: persistent_notification.create
+    data:
+      notification_id: "hvac_drift_{{ this.entity_id }}"
+      title: "HVAC desync suspected: {{ room_name }}"
+      message: >-
+        {{ room_name }} is {{ current_temp }}°C, {{
+        (target - current_temp) | round(1) }}°C below target {{ target }}°C,
+        but cooling_active has been off for
+        {{ ((now() - states[cooling_active_id].last_changed).total_seconds()
+        / 60) | int }} minutes.
+        The AC is likely physically ON while HA believes it is OFF.
+        Reconcile: check the room, press the AC power if needed, and make
+        sure the cooling_active boolean matches reality.
+  - action: "{{ notify_service }}"
+    data:
+      title: "HVAC desync suspected: {{ room_name }}"
+      message: >-
+        {{ room_name }}: {{ current_temp }}°C vs target {{ target }}°C with
+        cooling believed OFF. AC probably stuck ON — needs a manual check.
+
+mode: single
+max_exceeded: silent

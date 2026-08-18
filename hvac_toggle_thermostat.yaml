@@ -3,10 +3,17 @@ blueprint:
   description: >-
     Thermostat control for rooms with a physical toggle-based HVAC system using
     a Fingerbot (via Adaprox BLE gateway) to press the AC remote's power button.
-    Maintains an internal cooling state boolean, snapshots temperature at toggle
-    time for slow reconciliation, and uses a cooldown timer to prevent rapid
-    cycling. Each press is verified against the gateway status sensor's
-    feedback blip and retried once if it did not land.
+    Decides WHEN to press; it does NOT write the cooling state boolean. Press
+    bookkeeping (toggling cooling_active + snapshotting temp_at_toggle) lives
+    in the companion HVAC Press Listener automation, which reacts to the
+    gateway status sensor's press-feedback blip whenever it arrives — blip
+    latency is unbounded (observed 6s to 8.6 minutes), so bookkeeping tied to
+    this automation's run would lose late blips and desync the belief state.
+    A press is only issued when the gateway status is idle ('01') and the
+    cooldown timer is idle; there is no in-run retry (with unbounded latency
+    a timeout cannot distinguish a lost press from a late one), so the
+    cooldown — which must exceed typical blip latency — is the only re-press
+    throttle, and the outer loop provides lost-press recovery.
   domain: automation
   source_url: https://github.com/panghy/ha-blueprints/blob/main/hvac_toggle_thermostat.yaml
   input:
@@ -73,6 +80,7 @@ blueprint:
             DEPRECATED — no longer used. The blueprint now toggles the gateway
             switch directly without a BLE connect step. Kept only so existing
             automations that still supply this input keep validating.
+          default: ""
           selector:
             entity:
               filter:
@@ -90,12 +98,10 @@ blueprint:
           name: Gateway Status
           description: >-
             The Adaprox gateway's "Status" sensor for this Fingerbot's slot.
-            Used to verify a press physically landed: a successful press makes
-            this sensor blip from '01' to a hex feedback string (e.g.
-            '0500010154000300') within ~20 seconds. If no blip is seen the
-            press is retried once. Must be the Status sensor for this
-            Fingerbot's own slot — a shared or gateway-level sensor would
-            cross-confirm other slots' presses.
+            A press is only issued while this sensor reads '01' (not mid-blip
+            or '00' BLE-dropped). The companion Press Listener automation on
+            this same sensor owns the press bookkeeping. Must be the Status
+            sensor for this Fingerbot's own slot.
           selector:
             entity:
               filter:
@@ -131,8 +137,14 @@ blueprint:
               unit_of_measurement: "°C"
         cooldown_minutes:
           name: Cooldown Duration
-          description: Minutes to wait after pressing the toggle before allowing another press.
-          default: 3
+          description: >-
+            Minutes to wait after pressing the toggle before allowing another
+            press. This is the only re-press throttle, so it must exceed the
+            gateway's typical blip delivery latency (observed up to ~9
+            minutes): a shorter cooldown lets the loop re-press while a
+            previous press is still queued at the gateway, physically
+            toggling the AC back and forth.
+          default: 10
           selector:
             number:
               min: 1
@@ -243,70 +255,37 @@ actions:
         entity_id: !input cooling_active
         state: "off"
     then:
-      # Press the AC power button via Fingerbot
+      # Skip pressing while the slot is showing a blip or a '00' BLE drop.
+      # NOTE: this does NOT detect a queued-but-undelivered press (the
+      # sensor reads '01' while a command is in flight); the cooldown timer
+      # is the real re-press throttle, so its duration must cover typical
+      # blip latency (see cooldown_minutes).
+      - if:
+          - condition: template
+            value_template: "{{ states(gateway_status_id) != '01' }}"
+        then:
+          - stop: Gateway not idle; skipping press
+      # Press the AC power button via Fingerbot. Bookkeeping (cooling_active
+      # + temp_at_toggle) is NOT written here: the Press Listener automation
+      # toggles them when the status blip arrives, however late, so even a
+      # duplicate press self-reports as two toggles instead of silently
+      # corrupting the belief state. There is no in-run retry: with
+      # unbounded blip latency a timeout cannot distinguish a lost press
+      # from a late one, and a retry on a late press double-toggles. A
+      # genuinely lost press is recovered by the outer loop (next evaluation
+      # after cooldown still sees the temperature out of range and the
+      # belief unchanged) and surfaced by the Drift Watchdog.
       - action: switch.toggle
         target:
           entity_id: !input gateway_switch
-      # Start cooldown immediately: the idle-cooldown condition must block
-      # the next 1-minute trigger from restarting us mid-verification
+      # Start the cooldown: the idle-cooldown condition blocks re-pressing
+      # until it expires.
       - action: timer.start
         target:
           entity_id: !input cooldown_timer
         data:
           duration:
             minutes: "{{ cooldown_minutes | int }}"
-      # Verify the press landed: the gateway status sensor blips to a hex
-      # feedback string (non-'01'/'00') after a physical press. Observed blip
-      # latency ranges 6s to ~70s (the gateway can deliver a queued BLE press
-      # that late), so the wait must be 90s: a shorter window produces false
-      # -negative retries whose queued second press lands late and double
-      # -toggles the AC.
-      # wait_template rather than a state trigger: it is evaluated on entry,
-      # so a blip landing in the toggle->wait gap still counts
-      - wait_template: >-
-          {{ states(gateway_status_id)
-          not in ['01', '00', 'unknown', 'unavailable'] }}
-        timeout:
-          seconds: 90
-        continue_on_timeout: true
-      - if:
-          - condition: template
-            value_template: "{{ not wait.completed }}"
-        then:
-          # No feedback blip: re-press once, then wait again
-          - action: switch.toggle
-            target:
-              entity_id: !input gateway_switch
-          - wait_template: >-
-              {{ states(gateway_status_id)
-              not in ['01', '00', 'unknown', 'unavailable'] }}
-            timeout:
-              seconds: 90
-            continue_on_timeout: true
-          - if:
-              - condition: template
-                value_template: "{{ not wait.completed }}"
-            then:
-              # Second press also unconfirmed: give up (no loop) and leave the
-              # belief state untouched so reconciliation can correct it later
-              - action: persistent_notification.create
-                data:
-                  notification_id: "hvac_press_failed_{{ this.entity_id }}"
-                  title: HVAC press not confirmed
-                  message: >-
-                    {{ this.attributes.friendly_name }}: no gateway status
-                    feedback after two press attempts. Belief state left
-                    unchanged; check the Fingerbot/gateway.
-              - stop: Press unconfirmed after retry
-      # Confirmed press: snapshot temperature and mark cooling as active
-      - action: input_number.set_value
-        target:
-          entity_id: !input temp_at_toggle
-        data:
-          value: "{{ current_temp }}"
-      - action: input_boolean.turn_on
-        target:
-          entity_id: !input cooling_active
       - stop: ""
 
   # Control: cool enough, turn off cooling
@@ -319,70 +298,37 @@ actions:
         entity_id: !input cooling_active
         state: "on"
     then:
-      # Press the AC power button via Fingerbot
+      # Skip pressing while the slot is showing a blip or a '00' BLE drop.
+      # NOTE: this does NOT detect a queued-but-undelivered press (the
+      # sensor reads '01' while a command is in flight); the cooldown timer
+      # is the real re-press throttle, so its duration must cover typical
+      # blip latency (see cooldown_minutes).
+      - if:
+          - condition: template
+            value_template: "{{ states(gateway_status_id) != '01' }}"
+        then:
+          - stop: Gateway not idle; skipping press
+      # Press the AC power button via Fingerbot. Bookkeeping (cooling_active
+      # + temp_at_toggle) is NOT written here: the Press Listener automation
+      # toggles them when the status blip arrives, however late, so even a
+      # duplicate press self-reports as two toggles instead of silently
+      # corrupting the belief state. There is no in-run retry: with
+      # unbounded blip latency a timeout cannot distinguish a lost press
+      # from a late one, and a retry on a late press double-toggles. A
+      # genuinely lost press is recovered by the outer loop (next evaluation
+      # after cooldown still sees the temperature out of range and the
+      # belief unchanged) and surfaced by the Drift Watchdog.
       - action: switch.toggle
         target:
           entity_id: !input gateway_switch
-      # Start cooldown immediately: the idle-cooldown condition must block
-      # the next 1-minute trigger from restarting us mid-verification
+      # Start the cooldown: the idle-cooldown condition blocks re-pressing
+      # until it expires.
       - action: timer.start
         target:
           entity_id: !input cooldown_timer
         data:
           duration:
             minutes: "{{ cooldown_minutes | int }}"
-      # Verify the press landed: the gateway status sensor blips to a hex
-      # feedback string (non-'01'/'00') after a physical press. Observed blip
-      # latency ranges 6s to ~70s (the gateway can deliver a queued BLE press
-      # that late), so the wait must be 90s: a shorter window produces false
-      # -negative retries whose queued second press lands late and double
-      # -toggles the AC.
-      # wait_template rather than a state trigger: it is evaluated on entry,
-      # so a blip landing in the toggle->wait gap still counts
-      - wait_template: >-
-          {{ states(gateway_status_id)
-          not in ['01', '00', 'unknown', 'unavailable'] }}
-        timeout:
-          seconds: 90
-        continue_on_timeout: true
-      - if:
-          - condition: template
-            value_template: "{{ not wait.completed }}"
-        then:
-          # No feedback blip: re-press once, then wait again
-          - action: switch.toggle
-            target:
-              entity_id: !input gateway_switch
-          - wait_template: >-
-              {{ states(gateway_status_id)
-              not in ['01', '00', 'unknown', 'unavailable'] }}
-            timeout:
-              seconds: 90
-            continue_on_timeout: true
-          - if:
-              - condition: template
-                value_template: "{{ not wait.completed }}"
-            then:
-              # Second press also unconfirmed: give up (no loop) and leave the
-              # belief state untouched so reconciliation can correct it later
-              - action: persistent_notification.create
-                data:
-                  notification_id: "hvac_press_failed_{{ this.entity_id }}"
-                  title: HVAC press not confirmed
-                  message: >-
-                    {{ this.attributes.friendly_name }}: no gateway status
-                    feedback after two press attempts. Belief state left
-                    unchanged; check the Fingerbot/gateway.
-              - stop: Press unconfirmed after retry
-      # Confirmed press: snapshot temperature and mark cooling as inactive
-      - action: input_number.set_value
-        target:
-          entity_id: !input temp_at_toggle
-        data:
-          value: "{{ current_temp }}"
-      - action: input_boolean.turn_off
-        target:
-          entity_id: !input cooling_active
       - stop: ""
 
 mode: restart

@@ -1,0 +1,107 @@
+blueprint:
+  name: HVAC Press Listener
+  description: >-
+    Run-independent ground truth for Fingerbot presses. The Adaprox gateway
+    delivers press feedback ("blips") with unbounded latency — observed from
+    6 seconds to over 8 minutes after the toggle command — so any bookkeeping
+    tied to the lifetime of the pressing automation's run will eventually
+    lose a late blip and desync the belief state. This listener reacts to
+    every valid blip on the slot's status sensor, whenever it arrives and
+    whatever caused it (thermostat loop, retry, manual app press), by
+    toggling the cooling-active boolean and snapshotting the room
+    temperature. One physical press produces a PAIR of blip values
+    ~25-300ms apart (e.g. '0500000154000300' then '0500010154000300'), so a
+    press is counted only on the transition from idle ('01'/'00') into a
+    '0500...' value; the pair's second value transitions from another
+    '0500...' value and is ignored. Idle flapping between '01' and '00'
+    (BLE link drops) never matches. The 3rd byte of the blip is the
+    Fingerbot's battery level in hex, not a slot ID — it drifts as the
+    battery drains, so only the '0500' prefix is matched.
+  domain: automation
+  source_url: https://github.com/panghy/ha-blueprints/blob/main/hvac_press_listener.yaml
+  input:
+    gateway_status:
+      name: Gateway Status
+      description: >-
+        The Adaprox gateway's "Status" sensor for this Fingerbot's slot.
+        Each slot's sensor only ever reports its own presses, so attribution
+        is inherent.
+      selector:
+        entity:
+          filter:
+            - domain: sensor
+    cooling_active:
+      name: Cooling Active Boolean
+      description: >-
+        The input_boolean tracking whether the AC is on. Toggled on every
+        confirmed physical press; this listener is its only writer in the
+        press path.
+      selector:
+        entity:
+          filter:
+            - domain: input_boolean
+    temp_at_toggle:
+      name: Temperature at Toggle
+      description: >-
+        An input_number snapshotting the room temperature when the press
+        physically landed (blip time, not command time).
+      selector:
+        entity:
+          filter:
+            - domain: input_number
+    temp_sensor:
+      name: Temperature Sensor
+      description: The room temperature sensor entity.
+      selector:
+        entity:
+          filter:
+            - domain: sensor
+              device_class: temperature
+
+variables:
+  temp_sensor_id: !input temp_sensor
+  temp_at_toggle_id: !input temp_at_toggle
+
+triggers:
+  - trigger: state
+    entity_id: !input gateway_status
+
+conditions:
+  # A press is the transition idle -> '0500...', or '0500...' -> '0500...'
+  # when the previous blip value is stale (>2s old): one physical press
+  # emits a pair of 0500 values 25-400ms apart, so a >2s gap means a
+  # distinct press whose blip window abuts the previous one (queued
+  # delivery). unknown/unavailable are deliberately NOT idle: a gateway
+  # drop/restore around a lingering 0500 value would otherwise book a
+  # phantom press; a blip genuinely lost in an availability gap is instead
+  # recovered by reconciliation + the drift watchdog. '00'<->'01' idle
+  # flapping never matches.
+  - condition: template
+    value_template: >-
+      {{ trigger.to_state is not none
+      and trigger.from_state is not none
+      and trigger.to_state.state.startswith('0500')
+      and (
+        trigger.from_state.state in ['01', '00']
+        or (trigger.from_state.state.startswith('0500')
+            and (trigger.to_state.last_changed
+                 - trigger.from_state.last_changed).total_seconds() > 2)
+      ) }}
+
+actions:
+  # Snapshot first, then toggle: reconciliation compares against the
+  # temperature at the moment the press landed.
+  - action: input_number.set_value
+    target:
+      entity_id: !input temp_at_toggle
+    data:
+      value: >-
+        {{ states(temp_sensor_id)
+        | float(states(temp_at_toggle_id) | float(22)) }}
+  - action: input_boolean.toggle
+    target:
+      entity_id: !input cooling_active
+
+# Queued so that two real presses arriving close together both count.
+mode: queued
+max: 10

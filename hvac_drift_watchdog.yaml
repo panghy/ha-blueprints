@@ -76,7 +76,7 @@ blueprint:
       default: 21.5
       selector:
         number:
-          min: 20.0
+          min: 18.0
           max: 24.0
           step: 0.1
           unit_of_measurement: "°C"
@@ -84,13 +84,19 @@ blueprint:
       name: Temperature Rising Trend Sensor
       description: >-
         A Trend helper binary_sensor over the room temperature sensor
-        (recommended: sample_duration 1800s, min_gradient ~0.0001°C/s) that
-        reads "on" while the temperature is rising. The watchdog only alerts
-        while this sensor is "off": a stuck-on AC holds the room flat or
-        falling, while a merely-cool room in a Hong Kong summer drifts
+        (recommended: sample_duration 1800s, min_gradient ~0.0001°C/s,
+        min_samples 3, max_samples 120 — max_samples must be raised from its
+        default of 2, both so min_samples fits and so the sample buffer
+        actually spans the 30-min window on a frequently-updating sensor)
+        that reads "on" while the temperature is rising. The watchdog only
+        alerts while this sensor is "off": a stuck-on AC holds the room flat
+        or falling, while a merely-cool room in a Hong Kong summer drifts
         upward. If the trend sensor is unknown/unavailable the alert is
-        suppressed (fail-quiet; real desyncs last hours, so a settled trend
-        sensor will still catch them).
+        suppressed (fail-quiet). Trend state does not survive an HA restart:
+        the sensor settles after a few source-sensor updates following a
+        restart, so suppression after a restart is bounded by the
+        temperature sensor's update cadence — acceptable because real
+        desyncs last hours and the /5 trigger re-evaluates continuously.
       selector:
         entity:
           filter:
@@ -167,7 +173,7 @@ conditions:
   # A room at 23°C under a raised setpoint (e.g. target 24/25) is below
   # target but physically incompatible with a stuck-on AC — never alert.
   - condition: template
-    value_template: "{{ current_temp <= (stuck_on_ceiling | float) }}"
+    value_template: "{{ current_temp <= stuck_on_ceiling }}"
   # ...AND the temperature is not rising. A stuck-on AC holds the room flat
   # or falling; a merely-cool room in August drifts upward. Trend sensor
   # unknown/unavailable suppresses the alert (fail-quiet: real desyncs last
@@ -192,7 +198,8 @@ actions:
         (target - current_temp) | round(1) }}°C below target {{ target }}°C,
         but cooling_active has been off for
         {{ ((now() - states[cooling_active_id].last_changed).total_seconds()
-        / 60) | int }} minutes.
+        / 60) | int }} minutes (trend: {{ states(temp_trend_id) }}, gradient
+        {{ state_attr(temp_trend_id, 'gradient') }}).
         The AC is likely physically ON while HA believes it is OFF.
         Reconcile: check the room, press the AC power if needed, and make
         sure the cooling_active boolean matches reality.
@@ -201,7 +208,8 @@ actions:
       title: "HVAC desync suspected: {{ room_name }}"
       message: >-
         {{ room_name }}: {{ current_temp }}°C vs target {{ target }}°C with
-        cooling believed OFF. AC probably stuck ON — needs a manual check.
+        cooling believed OFF and temp not rising. AC probably stuck ON —
+        needs a manual check.
 
 mode: single
 max_exceeded: silent

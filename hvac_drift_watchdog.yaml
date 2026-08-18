@@ -7,11 +7,16 @@ blueprint:
     set to 20°C, so a genuinely stuck-on AC drags the room toward ~20°C or
     below (every observed real desync pinned the room at 18-21.5°C); a room
     resting at 23°C under a raised setpoint is physically incompatible with
-    a stuck-on AC and must never alert. Three gates must all pass:
+    a stuck-on AC and must never alert. Four gates must all pass:
     (1) temp >= drift_threshold below target, (2) temp at or below
-    stuck_on_ceiling (just above the ACs' own setpoint), and (3) temp not
+    stuck_on_ceiling (just above the ACs' own setpoint), (3) temp not
     rising per the trend sensor — a stuck-on AC holds the room flat or
-    falling, while a merely-cool room in a Hong Kong summer drifts upward.
+    falling, while a merely-cool room in a Hong Kong summer drifts upward —
+    and (4) the target setpoint unchanged for setpoint_grace_minutes: right
+    after a setpoint raise the room legitimately sits below the new target
+    while the lagging trend window can still read not-rising, so alerts are
+    deferred until the target has been stable; a real stuck-on AC persists
+    for hours, so the grace only delays detection, never loses it.
     Fires a persistent notification plus a phone notification so a human can
     reconcile the room; throttles itself via a repeat-notify window to avoid
     spamming.
@@ -101,6 +106,26 @@ blueprint:
         entity:
           filter:
             - domain: binary_sensor
+    setpoint_grace_minutes:
+      name: Setpoint Change Grace Period
+      description: >-
+        Minimum minutes the target input_number must have been unchanged
+        before an alert may fire. Right after a setpoint raise (wake
+        routine, away-setback restore) the room legitimately sits below the
+        new target while the 30-min trend window can lag the turn and still
+        read not-rising — the observed false-positive boundary case. A
+        genuinely stuck-on AC persists for hours, so this gate only delays
+        detection, never loses it. Uses the input_number's last_changed
+        directly (no helper needed); after an HA restart last_changed
+        resets, suppressing alerts for one grace period — fail-quiet,
+        bounded, and consistent with the trend gate's restart behavior.
+      default: 45
+      selector:
+        number:
+          min: 30
+          max: 60
+          step: 5
+          unit_of_measurement: minutes
     drift_minutes:
       name: Drift Duration
       description: >-
@@ -140,6 +165,7 @@ variables:
   drift_threshold: !input drift_threshold
   stuck_on_ceiling: !input stuck_on_ceiling
   temp_trend_id: !input temp_trend
+  setpoint_grace_minutes: !input setpoint_grace_minutes
   renotify_minutes: !input renotify_minutes
   notify_service: !input notify_service
   current_temp: "{{ states(temp_sensor_id) | float(99) }}"
@@ -181,6 +207,17 @@ conditions:
   - condition: state
     entity_id: !input temp_trend
     state: "off"
+  # ...AND the target setpoint has been stable for the grace period. Right
+  # after a raise (07:00 wake routine: nursery 21 -> 24) the room sits below
+  # the new target near the ceiling while the lagging 30-min trend window
+  # can still read not-rising — the one observed false-positive boundary
+  # case. A real stuck-on AC persists for hours; deferring the alert loses
+  # nothing. last_changed resets on HA restart, adding one bounded
+  # fail-quiet grace period post-restart.
+  - condition: template
+    value_template: >-
+      {{ (now() - states[target_temp_id].last_changed).total_seconds()
+      >= setpoint_grace_minutes | float * 60 }}
   # Throttle: skip if this automation alerted recently.
   - condition: template
     value_template: >-

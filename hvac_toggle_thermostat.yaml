@@ -67,12 +67,20 @@ blueprint:
           name: Off Cooldown Timer (optional)
           description: >-
             Optional separate timer helper gating OFF presses only. When set,
-            an ON press starts it with Post-On Cooldown Duration (the minimum
-            compressor run time) and an OFF press starts it with Cooldown
-            Duration (duplicate-OFF blip cover), allowing the OFF press to
-            land earlier than the full cooldown without weakening duplicate
-            -press protection. When left empty, OFF presses gate on the shared
-            Cooldown Timer exactly as before.
+            an ON press starts it with Post-On Cooldown Duration (the
+            minimum compressor run time) and an OFF press starts it with
+            Cooldown Duration (duplicate-OFF blip cover), letting the OFF
+            press land earlier than the full cooldown without weakening
+            duplicate-press protection. When left empty, OFF presses gate on
+            the shared Cooldown Timer exactly as before. Create the helper
+            with Restore enabled so an HA restart does not drop the running
+            gate. CAUTION: if this entity is deleted or unavailable the OFF
+            gate never reads idle — OFF presses are blocked (fail-frozen-ON)
+            while ON presses keep working; the Drift Watchdog is the
+            backstop, but fix the entity. On the first evaluation after
+            opting in, this timer is idle regardless of a recent ON press
+            (one-time migration window; the belief-anchored min-run check
+            still applies).
           default: ""
           selector:
             entity:
@@ -360,6 +368,18 @@ actions:
   - if:
       - condition: template
         value_template: "{{ states(off_gate_id) == 'idle' }}"
+      # Belief-anchored minimum run (opt-in rooms only): the off-cooldown
+      # timer starts at ON *command* time, but the press physically lands
+      # at blip time — when the Press Listener flips cooling_active on.
+      # With long blip latency the timer could already be idle at the flip,
+      # making the min-run floor soft; so additionally require the belief
+      # to have been 'on' for the post-on duration. No-op when no
+      # off-cooldown timer is configured (preserves original behavior).
+      - condition: template
+        value_template: >-
+          {{ off_cooldown_timer_id == ''
+          or (now() - states[cooling_active_id].last_changed).total_seconds()
+          >= (post_on_cooldown_minutes | int) * 60 }}
       - condition: template
         value_template: >-
           {{ temp_available and target_available

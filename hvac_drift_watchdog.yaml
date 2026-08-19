@@ -110,19 +110,25 @@ blueprint:
       name: Setpoint Change Grace Period
       description: >-
         Minimum minutes the target input_number must have been unchanged
-        before an alert may fire. Right after a setpoint raise (wake
+        (any change in either direction arms the grace, raises and lowers
+        alike) before an alert may fire. Right after a setpoint raise (wake
         routine, away-setback restore) the room legitimately sits below the
         new target while the 30-min trend window can lag the turn and still
         read not-rising — the observed false-positive boundary case. A
         genuinely stuck-on AC persists for hours, so this gate only delays
         detection, never loses it. Uses the input_number's last_changed
-        directly (no helper needed); after an HA restart last_changed
-        resets, suppressing alerts for one grace period — fail-quiet,
-        bounded, and consistent with the trend gate's restart behavior.
+        directly (no helper needed); last_changed is preserved on
+        same-value writes, so a script unconditionally re-writing an
+        unchanged setpoint does NOT re-arm the grace — only real value
+        changes do. After an HA restart the restored entity gets a fresh
+        state write, so alerts are suppressed for up to one full grace
+        period post-restart (fail-quiet, bounded). Values at or below the
+        trend window length (30 min) leave little margin over the trend
+        gate alone; the default of 45 is the window plus 50% margin.
       default: 45
       selector:
         number:
-          min: 30
+          min: 35
           max: 60
           step: 5
           unit_of_measurement: minutes
@@ -207,16 +213,21 @@ conditions:
   - condition: state
     entity_id: !input temp_trend
     state: "off"
-  # ...AND the target setpoint has been stable for the grace period. Right
-  # after a raise (07:00 wake routine: nursery 21 -> 24) the room sits below
-  # the new target near the ceiling while the lagging 30-min trend window
-  # can still read not-rising — the one observed false-positive boundary
-  # case. A real stuck-on AC persists for hours; deferring the alert loses
-  # nothing. last_changed resets on HA restart, adding one bounded
-  # fail-quiet grace period post-restart.
+  # ...AND the target setpoint has been unchanged for the grace period —
+  # direction-agnostic: any value change (raise OR lower, e.g. an away
+  # setback) arms the grace. The motivating case was a raise (07:00 wake
+  # routine: nursery 21 -> 24) leaving the room below the new target near
+  # the ceiling while the lagging 30-min trend window still read
+  # not-rising. A real stuck-on AC persists for hours; deferring the alert
+  # loses nothing. Same-value writes preserve last_changed and do not
+  # re-arm; an HA restart writes the restored state fresh, suppressing for
+  # up to one full grace period post-restart (fail-quiet, bounded). The
+  # none-guard makes this self-contained rather than relying on the
+  # target_available gate above.
   - condition: template
     value_template: >-
-      {{ (now() - states[target_temp_id].last_changed).total_seconds()
+      {{ states[target_temp_id] is not none
+      and (now() - states[target_temp_id].last_changed).total_seconds()
       >= setpoint_grace_minutes | float * 60 }}
   # Throttle: skip if this automation alerted recently.
   - condition: template

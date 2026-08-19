@@ -10,10 +10,12 @@ blueprint:
     latency is unbounded (observed 6s to 8.6 minutes), so bookkeeping tied to
     this automation's run would lose late blips and desync the belief state.
     A press is only issued when the gateway status is idle ('01') and the
-    cooldown timer is idle; there is no in-run retry (with unbounded latency
-    a timeout cannot distinguish a lost press from a late one), so the
-    cooldown — which must exceed typical blip latency — is the only re-press
-    throttle, and the outer loop provides lost-press recovery.
+    relevant cooldown timer is idle (ON presses gate on the cooldown timer;
+    OFF presses gate on the optional off-cooldown timer when configured,
+    enabling a shorter post-on minimum run); there is no in-run retry (with
+    unbounded latency a timeout cannot distinguish a lost press from a late
+    one), so the cooldown — which must exceed typical blip latency — is the
+    only re-press throttle, and the outer loop provides lost-press recovery.
   domain: automation
   source_url: https://github.com/panghy/ha-blueprints/blob/main/hvac_toggle_thermostat.yaml
   input:
@@ -53,7 +55,25 @@ blueprint:
                 - domain: input_number
         cooldown_timer:
           name: Cooldown Timer
-          description: A timer helper used to prevent rapid toggling after a press.
+          description: >-
+            A timer helper used to prevent rapid toggling after a press. Gates
+            ON presses (and reconciliation); also gates OFF presses unless a
+            separate Off Cooldown Timer is configured below.
+          selector:
+            entity:
+              filter:
+                - domain: timer
+        off_cooldown_timer:
+          name: Off Cooldown Timer (optional)
+          description: >-
+            Optional separate timer helper gating OFF presses only. When set,
+            an ON press starts it with Post-On Cooldown Duration (the minimum
+            compressor run time) and an OFF press starts it with Cooldown
+            Duration (duplicate-OFF blip cover), allowing the OFF press to
+            land earlier than the full cooldown without weakening duplicate
+            -press protection. When left empty, OFF presses gate on the shared
+            Cooldown Timer exactly as before.
+          default: ""
           selector:
             entity:
               filter:
@@ -151,6 +171,23 @@ blueprint:
               max: 15
               step: 1
               unit_of_measurement: minutes
+        post_on_cooldown_minutes:
+          name: Post-On Cooldown Duration
+          description: >-
+            Only used when an Off Cooldown Timer is configured: minutes after
+            an ON press before an OFF press is allowed (the minimum compressor
+            run time). Values below 5 minutes give the compressor very short
+            runs — do not go lower without a reason. Duplicate-press
+            protection is NOT weakened by this value: an OFF press is only
+            possible once the press listener has confirmed the ON blip, and
+            re-pressing OFF is still blocked for the full Cooldown Duration.
+          default: 10
+          selector:
+            number:
+              min: 1
+              max: 15
+              step: 1
+              unit_of_measurement: minutes
         reconciliation_minutes:
           name: Reconciliation Wait
           description: >-
@@ -182,12 +219,16 @@ variables:
   cooling_active_id: !input cooling_active
   temp_at_toggle_id: !input temp_at_toggle
   cooldown_timer_id: !input cooldown_timer
+  off_cooldown_timer_id: !input off_cooldown_timer
+  off_gate_id: >-
+    {{ off_cooldown_timer_id if off_cooldown_timer_id else cooldown_timer_id }}
   gateway_connect_id: !input gateway_connect
   gateway_switch_id: !input gateway_switch
   gateway_status_id: !input gateway_status
   upper_offset: !input upper_offset
   lower_offset: !input lower_offset
   cooldown_minutes: !input cooldown_minutes
+  post_on_cooldown_minutes: !input post_on_cooldown_minutes
   reconciliation_minutes: !input reconciliation_minutes
   reconciliation_drop: !input reconciliation_drop
   current_temp: "{{ states(temp_sensor_id) | float(15) }}"
@@ -206,13 +247,19 @@ conditions:
     entity_id: !input hvac_mode_select
     state:
       - Cooling
-  - condition: state
-    entity_id: !input cooldown_timer
-    state: idle
 
 actions:
+  # The cooldown gate is per-branch rather than automation-wide:
+  # reconciliation and the ON branch gate on the shared cooldown timer;
+  # the OFF branch gates on the off-cooldown timer when one is configured
+  # (falling back to the shared timer otherwise, preserving the original
+  # symmetric behavior for rooms that don't opt in).
+
   # Reconciliation: we think cooling is on but temp hasn't dropped
   - if:
+      - condition: state
+        entity_id: !input cooldown_timer
+        state: idle
       - condition: state
         entity_id: !input cooling_active
         state: "on"
@@ -231,6 +278,9 @@ actions:
   # Reconciliation: we think cooling is off but temp dropped significantly
   - if:
       - condition: state
+        entity_id: !input cooldown_timer
+        state: idle
+      - condition: state
         entity_id: !input cooling_active
         state: "off"
         for:
@@ -247,6 +297,9 @@ actions:
 
   # Control: too hot, turn on cooling
   - if:
+      - condition: state
+        entity_id: !input cooldown_timer
+        state: idle
       - condition: template
         value_template: >-
           {{ temp_available and target_available
@@ -278,7 +331,7 @@ actions:
       - action: switch.toggle
         target:
           entity_id: !input gateway_switch
-      # Start the cooldown: the idle-cooldown condition blocks re-pressing
+      # Start the cooldown: blocks re-pressing ON (and reconciliation)
       # until it expires.
       - action: timer.start
         target:
@@ -286,10 +339,27 @@ actions:
         data:
           duration:
             minutes: "{{ cooldown_minutes | int }}"
+      # If a separate off-cooldown timer is configured, start it with the
+      # post-on duration: this is the minimum compressor run time before an
+      # OFF press is allowed. Duplicate-press safety is unaffected — the OFF
+      # branch also requires cooling_active 'on', which only the Press
+      # Listener sets once this ON press's blip is confirmed.
+      - if:
+          - condition: template
+            value_template: "{{ off_cooldown_timer_id != '' }}"
+        then:
+          - action: timer.start
+            target:
+              entity_id: "{{ off_cooldown_timer_id }}"
+            data:
+              duration:
+                minutes: "{{ post_on_cooldown_minutes | int }}"
       - stop: ""
 
   # Control: cool enough, turn off cooling
   - if:
+      - condition: template
+        value_template: "{{ states(off_gate_id) == 'idle' }}"
       - condition: template
         value_template: >-
           {{ temp_available and target_available
@@ -321,14 +391,28 @@ actions:
       - action: switch.toggle
         target:
           entity_id: !input gateway_switch
-      # Start the cooldown: the idle-cooldown condition blocks re-pressing
-      # until it expires.
+      # Start the cooldown: blocks the next ON press for the full duration
+      # (compressor restart protection) and reconciliation until it expires.
       - action: timer.start
         target:
           entity_id: !input cooldown_timer
         data:
           duration:
             minutes: "{{ cooldown_minutes | int }}"
+      # If a separate off-cooldown timer is configured, restart it with the
+      # full cooldown duration: duplicate-OFF cover for late blips (the
+      # off-gate must stay blocked as long as an OFF press may still be
+      # queued at the gateway).
+      - if:
+          - condition: template
+            value_template: "{{ off_cooldown_timer_id != '' }}"
+        then:
+          - action: timer.start
+            target:
+              entity_id: "{{ off_cooldown_timer_id }}"
+            data:
+              duration:
+                minutes: "{{ cooldown_minutes | int }}"
       - stop: ""
 
 mode: restart

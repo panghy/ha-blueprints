@@ -305,7 +305,7 @@ actions:
       - condition: template
         value_template: >-
           {{ temp_available and toggle_temp_available
-          and current_temp >= (toggle_temp + reconciliation_rise) }}
+          and (current_temp - toggle_temp) | round(1) >= reconciliation_rise }}
     then:
       - action: input_boolean.turn_off
         target:

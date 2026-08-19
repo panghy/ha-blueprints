@@ -220,6 +220,30 @@ blueprint:
               max: 3.0
               step: 0.1
               unit_of_measurement: "°C"
+        reconciliation_rise:
+          name: Reconciliation Rise Threshold
+          description: >-
+            If cooling_active is on but the temperature has risen by at least
+            this amount above the last-toggle snapshot, assume the AC is
+            actually off. A margin of 0 (the old behavior) fires on any
+            non-negative change, which cannot distinguish a genuinely-off AC
+            from a running one merely losing to heat load (near-zero cooling
+            rate): with a 0.1 °C-resolution sensor, flat-load readings sit
+            0.0–0.3 above the snapshot and falsely flip the belief off — the
+            next loop press then physically turns the running AC OFF,
+            inverting polarity. Sized from listener-era history (Aug 18–19):
+            false positives peaked at +0.3 while every genuine desync showed
+            +0.4 to +1.6 at detection time, so 0.4 suppresses all observed
+            false flips with zero added delay on the genuine ones. Raising it
+            further delays recovery from real stuck-off desyncs (the room
+            must warm that much past the snapshot before correction).
+          default: 0.4
+          selector:
+            number:
+              min: 0.0
+              max: 2.0
+              step: 0.1
+              unit_of_measurement: "°C"
 
 variables:
   temp_sensor_id: !input temp_sensor
@@ -239,6 +263,7 @@ variables:
   post_on_cooldown_minutes: !input post_on_cooldown_minutes
   reconciliation_minutes: !input reconciliation_minutes
   reconciliation_drop: !input reconciliation_drop
+  reconciliation_rise: !input reconciliation_rise
   current_temp: "{{ states(temp_sensor_id) | float(15) }}"
   target: "{{ states(target_temp_id) | float(22) }}"
   toggle_temp: "{{ states(temp_at_toggle_id) | float(15) }}"
@@ -263,7 +288,11 @@ actions:
   # (falling back to the shared timer otherwise, preserving the original
   # symmetric behavior for rooms that don't opt in).
 
-  # Reconciliation: we think cooling is on but temp hasn't dropped
+  # Reconciliation: we think cooling is on but the temp has RISEN past the
+  # snapshot by the rise margin. A bare >= snapshot comparison (rise 0)
+  # cannot tell a genuinely-off AC from a running one losing to heat load,
+  # and a false flip here makes the next loop press turn the running AC
+  # physically OFF (polarity inversion) — see reconciliation_rise.
   - if:
       - condition: state
         entity_id: !input cooldown_timer
@@ -276,7 +305,7 @@ actions:
       - condition: template
         value_template: >-
           {{ temp_available and toggle_temp_available
-          and current_temp >= toggle_temp }}
+          and current_temp >= (toggle_temp + reconciliation_rise) }}
     then:
       - action: input_boolean.turn_off
         target:

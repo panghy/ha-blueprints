@@ -16,6 +16,13 @@ blueprint:
     unbounded latency a timeout cannot distinguish a lost press from a late
     one), so the cooldown — which must exceed typical blip latency — is the
     only re-press throttle, and the outer loop provides lost-press recovery.
+    Evaluation is reactive, not polled: triggers fire on temperature and
+    target changes, on cooldown/off-cooldown timer.finished events, on the
+    cooling belief dwelling long enough to release the min-run and
+    reconciliation gates, and on the mode selector returning to Cooling —
+    plus a 15-minute time_pattern safety net bounding staleness after
+    restarts or missed events. Overlapping triggers are harmless (mode
+    restart + idempotent conditions).
   domain: automation
   source_url: https://github.com/panghy/ha-blueprints/blob/main/hvac_toggle_thermostat.yaml
   input:
@@ -272,8 +279,53 @@ variables:
   toggle_temp_available: "{{ states(temp_at_toggle_id) not in ['unknown', 'unavailable'] }}"
 
 triggers:
+  # Reactive evaluation: fire on every input the conditions read, so
+  # decisions land within seconds of the change instead of on the next
+  # minute boundary. Triggers may overlap (e.g. both cooling_active dwell
+  # triggers); that is harmless — mode: restart plus idempotent conditions
+  # make extra evaluations no-ops.
+
+  # ON/OFF threshold crossings + reconciliation temperature comparisons.
+  - trigger: state
+    entity_id: !input temp_sensor
+  # Schedules and idle/away setbacks moving the target.
+  - trigger: state
+    entity_id: !input target_temp
+  # ON-press / reconciliation gate opening.
+  - trigger: event
+    event_type: timer.finished
+    event_data:
+      entity_id: !input cooldown_timer
+  # OFF gate opening. When the optional off-cooldown timer is left empty
+  # this filter is entity_id '' and simply never matches (timer.finished
+  # events always carry a real entity_id) — the OFF branch then gates on
+  # the shared cooldown timer, whose finished event triggers above.
+  - trigger: event
+    event_type: timer.finished
+    event_data:
+      entity_id: !input off_cooldown_timer
+  # Belief-anchored minimum-run guard releasing (OFF branch).
+  - trigger: state
+    entity_id: !input cooling_active
+    to: "on"
+    for:
+      minutes: !input post_on_cooldown_minutes
+  # Reconciliation dwell elapsing (both directions).
+  - trigger: state
+    entity_id: !input cooling_active
+    to:
+      - "on"
+      - "off"
+    for:
+      minutes: !input reconciliation_minutes
+  # Control resuming when the house flips back into Cooling mode.
+  - trigger: state
+    entity_id: !input hvac_mode_select
+    to: Cooling
+  # Safety net: bounds staleness after HA restarts or missed events
+  # (e.g. a timer.finished that fired while automations were reloading).
   - trigger: time_pattern
-    minutes: /1
+    minutes: /15
 
 conditions:
   - condition: state

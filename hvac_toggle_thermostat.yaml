@@ -16,6 +16,15 @@ blueprint:
     unbounded latency a timeout cannot distinguish a lost press from a late
     one), so the cooldown — which must exceed typical blip latency — is the
     only re-press throttle, and the outer loop provides lost-press recovery.
+    Evaluation is reactive, not polled: triggers fire on temperature and
+    target changes, on cooldown/off-cooldown timer.finished events, on
+    cooling-belief flips and on the belief dwelling long enough to release
+    the min-run and reconciliation gates, on the gateway slot returning
+    idle, and on the mode selector returning to Cooling — plus a 15-minute
+    time_pattern safety net bounding staleness after restarts or missed
+    events. Overlapping triggers are harmless between runs (mode restart +
+    idempotent conditions); see the trigger block for the one accepted
+    mid-run restart caveat.
   domain: automation
   source_url: https://github.com/panghy/ha-blueprints/blob/main/hvac_toggle_thermostat.yaml
   input:
@@ -58,7 +67,12 @@ blueprint:
           description: >-
             A timer helper used to prevent rapid toggling after a press. Gates
             ON presses (and reconciliation); also gates OFF presses unless a
-            separate Off Cooldown Timer is configured below.
+            separate Off Cooldown Timer is configured below. Create the
+            helper with Restore enabled so an HA restart does not drop a
+            running cooldown: this timer's finished event is a primary
+            trigger, and a non-restoring timer that goes idle across a
+            restart emits none (the 15-minute safety net is then the only
+            backstop).
           selector:
             entity:
               filter:
@@ -272,8 +286,86 @@ variables:
   toggle_temp_available: "{{ states(temp_at_toggle_id) not in ['unknown', 'unavailable'] }}"
 
 triggers:
+  # Reactive evaluation: fire on every input the conditions read, so
+  # decisions land within seconds of the change instead of on the next
+  # minute boundary. Triggers may overlap (e.g. both cooling_active dwell
+  # triggers); that is harmless between runs — mode: restart plus
+  # idempotent conditions make extra evaluations no-ops.
+  #
+  # Accepted caveat (PR #8 review): with mode: restart, a trigger landing
+  # while a run sits between switch.toggle and the timer.start that arms
+  # the cooldown cancels the run with a press issued but no cooldown —
+  # the next evaluation may double-press. The window is the gap between
+  # two adjacent service calls (no waits in between) and needs a second
+  # trigger right after the one that started the run; the temp/target
+  # triggers below filter to state-value changes (to:) to keep
+  # attribute-only bursts out of it, and a duplicate press self-reports
+  # as two listener-booked toggles rather than corrupting belief state.
+  # Follow-up (separate PR, action reorder out of scope here): arm the
+  # cooldown before pressing so an aborted run fails safe as a spurious
+  # cooldown instead of a missing one.
+
+  # ON/OFF threshold crossings + reconciliation temperature comparisons.
+  # to: null fires on state-value changes only, not attribute-only writes.
+  - trigger: state
+    entity_id: !input temp_sensor
+    to: null
+  # Schedules and idle/away setbacks moving the target.
+  - trigger: state
+    entity_id: !input target_temp
+    to: null
+  # ON-press / reconciliation gate opening.
+  - trigger: event
+    event_type: timer.finished
+    event_data:
+      entity_id: !input cooldown_timer
+  # OFF gate opening. When the optional off-cooldown timer is left empty
+  # this filter is entity_id '' and simply never matches (timer.finished
+  # events always carry a real entity_id) — the OFF branch then gates on
+  # the shared cooldown timer, whose finished event triggers above.
+  # A manual timer.cancel, or an HA restart with a non-restoring timer,
+  # yields an idle gate with no finished event; the /15 net covers both.
+  - trigger: event
+    event_type: timer.finished
+    event_data:
+      entity_id: !input off_cooldown_timer
+  # Belief flips: a reconciliation correction can leave the room out of
+  # range with the cooldown already idle (idleness was a precondition of
+  # the flip), so act on the new belief immediately. After listener press
+  # bookings the cooldown is always running, so those runs are no-ops.
+  - trigger: state
+    entity_id: !input cooling_active
+    to:
+      - "on"
+      - "off"
+  # Belief-anchored minimum-run guard releasing (OFF branch).
+  - trigger: state
+    entity_id: !input cooling_active
+    to: "on"
+    for:
+      minutes: !input post_on_cooldown_minutes
+  # Reconciliation dwell elapsing (both directions).
+  - trigger: state
+    entity_id: !input cooling_active
+    to:
+      - "on"
+      - "off"
+    for:
+      minutes: !input reconciliation_minutes
+  # Gateway slot returning idle ('01') after a blip or a '00' BLE drop:
+  # a press skipped on a busy/dropped gateway retries as soon as the
+  # slot is pressable again instead of waiting for the next sensor tick.
+  - trigger: state
+    entity_id: !input gateway_status
+    to: "01"
+  # Control resuming when the house flips back into Cooling mode.
+  - trigger: state
+    entity_id: !input hvac_mode_select
+    to: Cooling
+  # Safety net: bounds staleness after HA restarts or missed events
+  # (e.g. a timer.finished that fired while automations were reloading).
   - trigger: time_pattern
-    minutes: /1
+    minutes: /15
 
 conditions:
   - condition: state

@@ -39,7 +39,10 @@ blueprint:
       description: >-
         The input_boolean tracking whether the AC is on. Toggled on every
         confirmed physical press; this listener is its only writer in the
-        press path.
+        press path. Its last_changed also arms the refractory window, so
+        ANY writer (e.g. a reconciliation correction) suppresses press
+        booking for refractory_seconds after it — a miss the
+        reconciliation/watchdog recovers.
       selector:
         entity:
           filter:
@@ -116,8 +119,10 @@ conditions:
   # booked press, so its last_changed doubles as the last-press
   # timestamp (no extra helper needed). A blip landing within
   # refractory_seconds of the previous booking is a duplicate gateway
-  # re-fire, not a physical press. A missing/never-set boolean does not
-  # suppress.
+  # re-fire, not a physical press. A non-existent/renamed boolean
+  # entity (states[...] is none) does not suppress. Note last_changed
+  # also resets on HA restart and on any other writer to the boolean —
+  # both suppress for one window at most (miss-tolerant by design).
   - condition: template
     value_template: >-
       {{ states[cooling_active_id] is none

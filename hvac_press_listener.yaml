@@ -16,7 +16,11 @@ blueprint:
     '0500...' value and is ignored. Idle flapping between '01' and '00'
     (BLE link drops) never matches. The 3rd byte of the blip is the
     Fingerbot's battery level in hex, not a slot ID — it drifts as the
-    battery drains, so only the '0500' prefix is matched.
+    battery drains, so only the '0500' prefix is matched. After a press
+    is booked, further bookings are suppressed for a refractory window
+    (default 45 s): the gateway occasionally re-fires a stale blip value
+    through a genuine '01' at the ~30 s revert-to-idle boundary, which
+    would otherwise book a phantom press.
   domain: automation
   source_url: https://github.com/panghy/ha-blueprints/blob/main/hvac_press_listener.yaml
   input:
@@ -57,10 +61,31 @@ blueprint:
           filter:
             - domain: sensor
               device_class: temperature
+    refractory_seconds:
+      name: Refractory Window
+      description: >-
+        Seconds after a booked press during which no further press is
+        booked. The gateway can RE-FIRE a stale blip value through a
+        genuine idle '01' at the ~30 s revert boundary (observed
+        2026-08-29, ~31 s after the real pair), evading both the
+        pair-staleness rule and the unknown/unavailable guard.
+        Legitimate automation presses are >= 10 min apart (cooldown), so
+        45 s only risks missing a manual press racing the window — a
+        miss the reconciliation/watchdog recovers (the design is
+        miss-tolerant, phantom-intolerant).
+      default: 45
+      selector:
+        number:
+          min: 0
+          max: 300
+          step: 1
+          unit_of_measurement: seconds
 
 variables:
   temp_sensor_id: !input temp_sensor
   temp_at_toggle_id: !input temp_at_toggle
+  cooling_active_id: !input cooling_active
+  refractory_seconds: !input refractory_seconds
 
 triggers:
   - trigger: state
@@ -87,6 +112,17 @@ conditions:
             and (trigger.to_state.last_changed
                  - trigger.from_state.last_changed).total_seconds() > 2)
       ) }}
+  # Refractory window: the listener toggles cooling_active on every
+  # booked press, so its last_changed doubles as the last-press
+  # timestamp (no extra helper needed). A blip landing within
+  # refractory_seconds of the previous booking is a duplicate gateway
+  # re-fire, not a physical press. A missing/never-set boolean does not
+  # suppress.
+  - condition: template
+    value_template: >-
+      {{ states[cooling_active_id] is none
+      or (now() - states[cooling_active_id].last_changed).total_seconds()
+         > refractory_seconds }}
 
 actions:
   # Snapshot first, then toggle: reconciliation compares against the
@@ -102,6 +138,8 @@ actions:
     target:
       entity_id: !input cooling_active
 
-# Queued so that two real presses arriving close together both count.
+# Queued so that close-together triggers are evaluated in order rather
+# than dropped; note the refractory window means only the first booking
+# within refractory_seconds counts.
 mode: queued
 max: 10

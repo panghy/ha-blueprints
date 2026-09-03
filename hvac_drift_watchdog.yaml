@@ -313,7 +313,7 @@ actions:
       - condition: template
         value_template: "{{ notify_service_2 | trim != '' }}"
     then:
-      - action: "{{ notify_service_2 }}"
+      - action: "{{ notify_service_2 | trim }}"
         data:
           title: "HVAC desync suspected: {{ room_name }}"
           message: >-
@@ -326,12 +326,12 @@ actions:
       - condition: template
         value_template: >-
           {{ tts_media_player | trim != ''
-          and (tts_gate | trim == '' or is_state(tts_gate, 'on')) }}
+          and (tts_gate | trim == '' or is_state(tts_gate | trim, 'on')) }}
     then:
       - action: tts.cloud_say
         data:
           cache: false
-          entity_id: "{{ tts_media_player }}"
+          entity_id: "{{ tts_media_player | trim }}"
           message: >-
             Attention: possible H V A C desync in the {{ room_name }}. The
             room is {{ current_temp }} degrees against a target of

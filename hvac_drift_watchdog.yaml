@@ -19,7 +19,9 @@ blueprint:
     for hours, so the grace only delays detection, never loses it.
     Fires a persistent notification plus a phone notification so a human can
     reconcile the room; throttles itself via a repeat-notify window to avoid
-    spamming.
+    spamming. Optional escalation inputs: a second phone notify service, iOS
+    CRITICAL push (bypasses DND/silent), and a TTS announcement on a media
+    player gated on an input_boolean (e.g. only while sleep mode is on).
   domain: automation
   source_url: https://github.com/panghy/ha-blueprints/blob/main/hvac_drift_watchdog.yaml
   input:
@@ -162,6 +164,45 @@ blueprint:
       default: notify.mobile_app_clements_iphone
       selector:
         text:
+    notify_service_2:
+      name: Second Phone Notify Service (optional)
+      description: >-
+        Optional second notify service to alert as well (e.g.
+        notify.mobile_app_grid). Empty string disables the second phone.
+      default: ""
+      selector:
+        text:
+    critical_push:
+      name: iOS Critical Push
+      description: >-
+        Send the phone alerts as iOS CRITICAL notifications
+        (push.sound.critical: 1, volume 0.7) so they bypass Do Not Disturb,
+        Focus modes and the silent switch. Use for rooms where a desync must
+        wake a sleeping human (e.g. the nursery). Off keeps the previous
+        standard-push behavior.
+      default: false
+      selector:
+        boolean:
+    tts_media_player:
+      name: TTS Announce Media Player (optional)
+      description: >-
+        Optional media_player entity to announce the alert on via
+        tts.cloud_say (e.g. a bedroom HomePod). Empty string disables the
+        announcement.
+      default: ""
+      selector:
+        text:
+    tts_gate:
+      name: TTS Gate Boolean (optional)
+      description: >-
+        Optional input_boolean that must be "on" for the TTS announcement to
+        play (e.g. input_boolean.sleep_mode, so the bedroom speaker only
+        announces while adults are asleep and the phones would otherwise be
+        silenced). Empty string announces unconditionally whenever a TTS
+        media player is set.
+      default: ""
+      selector:
+        text:
 
 variables:
   temp_sensor_id: !input temp_sensor
@@ -174,6 +215,14 @@ variables:
   setpoint_grace_minutes: !input setpoint_grace_minutes
   renotify_minutes: !input renotify_minutes
   notify_service: !input notify_service
+  notify_service_2: !input notify_service_2
+  critical_push: !input critical_push
+  tts_media_player: !input tts_media_player
+  tts_gate: !input tts_gate
+  # iOS companion-app critical push payload; {} keeps a standard push.
+  push_data: >-
+    {{ {'push': {'sound': {'name': 'default', 'critical': 1,
+    'volume': 0.7}}} if critical_push else {} }}
   current_temp: "{{ states(temp_sensor_id) | float(99) }}"
   target: "{{ states(target_temp_id) | float(0) }}"
   temp_available: "{{ states(temp_sensor_id) not in ['unknown', 'unavailable'] }}"
@@ -258,6 +307,35 @@ actions:
         {{ room_name }}: {{ current_temp }}°C vs target {{ target }}°C with
         cooling believed OFF and temp not rising. AC probably stuck ON —
         needs a manual check.
+      data: "{{ push_data }}"
+  # Optional second phone (skipped when notify_service_2 is empty).
+  - if:
+      - condition: template
+        value_template: "{{ notify_service_2 | trim != '' }}"
+    then:
+      - action: "{{ notify_service_2 | trim }}"
+        data:
+          title: "HVAC desync suspected: {{ room_name }}"
+          message: >-
+            {{ room_name }}: {{ current_temp }}°C vs target {{ target }}°C
+            with cooling believed OFF and temp not rising. AC probably stuck
+            ON — needs a manual check.
+          data: "{{ push_data }}"
+  # Optional TTS announcement, gated on the tts_gate boolean when set.
+  - if:
+      - condition: template
+        value_template: >-
+          {{ tts_media_player | trim != ''
+          and (tts_gate | trim == '' or is_state(tts_gate | trim, 'on')) }}
+    then:
+      - action: tts.cloud_say
+        data:
+          cache: false
+          entity_id: "{{ tts_media_player | trim }}"
+          message: >-
+            Attention: possible H V A C desync in the {{ room_name }}. The
+            room is {{ current_temp }} degrees against a target of
+            {{ target }}. The AC may be stuck on and needs a manual check.
 
 mode: single
 max_exceeded: silent

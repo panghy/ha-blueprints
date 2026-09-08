@@ -109,7 +109,11 @@ blueprint:
         the entity is missing/renamed the gate fails closed: nothing
         books, every blip logs as uncorrelated — a visible
         misconfiguration recovered by reconciliation/watchdog rather
-        than a silent phantom source.
+        than a silent phantom source. Note an HA restart resets this
+        switch's last_changed to startup time, leaving the gate open
+        for one Correlation Window after every restart — restarts are
+        also when the startup belief resync presses, so treat
+        post-restart bookings with that in mind.
       selector:
         entity:
           filter:

@@ -20,7 +20,19 @@ blueprint:
     is booked, further bookings are suppressed for a refractory window
     (default 45 s): the gateway occasionally re-fires a stale blip value
     through a genuine '01' at the ~30 s revert-to-idle boundary, which
-    would otherwise book a phantom press.
+    would otherwise book a phantom press. Finally, a correlation gate
+    (2026-09-09): a press-shaped blip books a press ONLY if the slot's
+    gateway press switch changed state within correlation_seconds
+    (default 60) before the blip — every commanded press path
+    (thermostat loop, startup resync, manual HA/app press) actuates
+    that switch first, while a gateway reconnect/state-refresh replay
+    emits blips with no switch actuation at all (2026-09-09 05:58 HKT
+    nursery incident: a reconnect-burst replay blip 2 h after the last
+    real press booked a phantom and inverted the belief). Uncorrelated
+    blips are never booked; each one writes a logbook entry so gateway
+    hiccup frequency stays visible. A real blip arriving later than the
+    window is a deliberate miss recovered by reconciliation/the drift
+    watchdog (miss-tolerant, phantom-intolerant).
   domain: automation
   source_url: https://github.com/panghy/ha-blueprints/blob/main/hvac_press_listener.yaml
   input:
@@ -83,12 +95,54 @@ blueprint:
           max: 300
           step: 1
           unit_of_measurement: seconds
+    gateway_switch:
+      name: Gateway Press Switch
+      description: >-
+        The gateway's press switch for this Fingerbot's slot — the
+        entity every commanded press actuates (the same entity as the
+        toggle blueprint's Gateway Switch input). Used purely as a
+        correlation reference; this listener never actuates it. A blip
+        books a press only when this switch changed state within
+        Correlation Window seconds before the blip. The switch holds
+        toggle state (one state change per commanded press, no revert),
+        so its last_changed is the time of the last press command. If
+        the entity is missing/renamed the gate fails closed: nothing
+        books, every blip logs as uncorrelated — a visible
+        misconfiguration recovered by reconciliation/watchdog rather
+        than a silent phantom source.
+      selector:
+        entity:
+          filter:
+            - domain: switch
+    correlation_seconds:
+      name: Correlation Window
+      description: >-
+        Seconds after a press-switch actuation during which a blip is
+        accepted as that press's confirmation. Observed command-to-blip
+        latency is typically a few seconds to ~45 s (2026-09-09: 45 s
+        on the nursery 23:37 UTC press), but has historically reached
+        8+ minutes under gateway backlog; a blip later than this window
+        is deliberately MISSED (bookkeeping unchanged, logbook entry
+        written) and left to reconciliation/the drift watchdog — a
+        phantom booked from a reconnect replay inverts the belief and
+        actively fights the room, while a miss is self-healing. Do not
+        raise far above the default: the wider the window, the more a
+        reconnect burst trailing a real press can alias into it.
+      default: 60
+      selector:
+        number:
+          min: 5
+          max: 600
+          step: 1
+          unit_of_measurement: seconds
 
 variables:
   temp_sensor_id: !input temp_sensor
   temp_at_toggle_id: !input temp_at_toggle
   cooling_active_id: !input cooling_active
   refractory_seconds: !input refractory_seconds
+  gateway_switch_id: !input gateway_switch
+  correlation_seconds: !input correlation_seconds
 
 triggers:
   - trigger: state
@@ -130,18 +184,54 @@ conditions:
          > refractory_seconds }}
 
 actions:
-  # Snapshot first, then toggle: reconciliation compares against the
-  # temperature at the moment the press landed.
-  - action: input_number.set_value
-    target:
-      entity_id: !input temp_at_toggle
-    data:
-      value: >-
-        {{ states(temp_sensor_id)
-        | float(states(temp_at_toggle_id) | float(22)) }}
-  - action: input_boolean.toggle
-    target:
-      entity_id: !input cooling_active
+  # Correlation gate: a blip is only a press confirmation if a press was
+  # actually commanded — i.e. the slot's press switch changed state within
+  # correlation_seconds BEFORE the blip. Gateway reconnect/state-refresh
+  # replays (2026-09-09 05:58 HKT nursery) emit press-shaped blips with no
+  # switch actuation and must never book. Implemented as if/then/else (not
+  # a condition) so the rejected path leaves a logbook trail. The bound is
+  # one-sided (delta < window, no >= 0 floor): under queued mode a run can
+  # start after a NEWER press command lands, making the delta negative for
+  # the prior press's blip — still evidence of a commanded press, so it
+  # books. A missing/renamed switch entity fails closed into the log path.
+  - if:
+      - condition: template
+        value_template: >-
+          {{ states[gateway_switch_id] is not none
+          and (trigger.to_state.last_changed
+               - states[gateway_switch_id].last_changed).total_seconds()
+             < correlation_seconds }}
+    then:
+      # Snapshot first, then toggle: reconciliation compares against the
+      # temperature at the moment the press landed.
+      - action: input_number.set_value
+        target:
+          entity_id: !input temp_at_toggle
+        data:
+          value: >-
+            {{ states(temp_sensor_id)
+            | float(states(temp_at_toggle_id) | float(22)) }}
+      - action: input_boolean.toggle
+        target:
+          entity_id: !input cooling_active
+    else:
+      # One entry per ignored blip (the pair's second value never reaches
+      # here — the pair-staleness condition drops it), so a phantom event
+      # logs once and cooling_active is untouched. Tracked via logbook to
+      # watch gateway hiccup frequency without paging anyone.
+      - action: logbook.log
+        data:
+          name: "{{ this.attributes.friendly_name }}"
+          entity_id: "{{ this.entity_id }}"
+          message: >-
+            {% set sw = states[gateway_switch_id] %} ignored uncorrelated
+            press blip '{{ trigger.to_state.state }}' at
+            {{ trigger.to_state.last_changed.isoformat() }} — press switch
+            {{ gateway_switch_id }}
+            {{ 'not found' if sw is none else 'last actuated ' ~
+               ((trigger.to_state.last_changed - sw.last_changed)
+                .total_seconds() | round(1)) ~ ' s before the blip' }}
+            (window {{ correlation_seconds }} s); no press booked.
 
 # Queued so that close-together triggers are evaluated in order rather
 # than dropped; note the refractory window means only the first booking

@@ -32,7 +32,27 @@ blueprint:
     blips are never booked; each one writes a logbook entry so gateway
     hiccup frequency stays visible. A real blip arriving later than the
     window is a deliberate miss recovered by reconciliation/the drift
-    watchdog (miss-tolerant, phantom-intolerant).
+    watchdog (miss-tolerant, phantom-intolerant). Rejected-blip
+    classification (2026-09-09, after two same-day inversions the gate
+    left silent — living room 13:03 HKT, blip 121.7 s after its press;
+    nursery 14:37 HKT, gateway disconnect delayed the blip ~9 min and
+    belief stayed inverted ~4.5 h): a rejection is exactly the moment
+    belief may have diverged, so the rejected path no longer fails
+    silent. Each rejected blip is classified: SUSPICIOUS-LATE (the
+    press switch actuated within Late Feedback Lookback seconds before
+    the blip AND cooling_active has not been written since that
+    actuation — the blip is almost certainly that press's only
+    feedback, so the press landed physically but was never booked and
+    belief is likely inverted) sends one immediate standard push via
+    Alert Notify Service naming the listener, the blip, both
+    timestamps and the delta; DUPLICATE-REFIRE (an actuation within
+    the lookback but cooling_active was already written after it — the
+    press's real feedback already booked, this is the known ~30 s
+    stale re-fire) and PHANTOM (no actuation within the lookback — a
+    gateway reconnect/state-refresh replay, the class the gate exists
+    to reject; belief is fine) stay logbook-only and never page. The
+    60 s correlation window is unchanged: this adds observability on
+    the rejected path only, and the accepted-press path is untouched.
   domain: automation
   source_url: https://github.com/panghy/ha-blueprints/blob/main/hvac_press_listener.yaml
   input:
@@ -139,6 +159,47 @@ blueprint:
           max: 600
           step: 1
           unit_of_measurement: seconds
+    late_lookback_seconds:
+      name: Late Feedback Lookback
+      description: >-
+        Added 2026-09-09 (rejected-blip classification). Seconds after a
+        press-switch actuation during which a REJECTED blip is treated
+        as that press's suspiciously late feedback rather than a
+        phantom. Command-to-blip latency beyond the 60 s window is
+        common under gateway backlog (replayed 2026-09-06..09-09 across
+        all five rooms: ~10-38 late first-feedback blips per day
+        house-wide, deltas 60-550 s), and has historically reached
+        8+ minutes (nursery 2026-09-09: 543.5 s after a gateway
+        disconnect). A rejected blip with an actuation inside this
+        lookback and no cooling_active write since that actuation means
+        a commanded press physically landed but was never booked —
+        belief is likely inverted. Beyond the lookback a rejected blip
+        has no plausible commanding press and is classified a phantom
+        replay (log-only). The default of 900 covers every observed
+        genuine-late delta with margin.
+      default: 900
+      selector:
+        number:
+          min: 120
+          max: 3600
+          step: 30
+          unit_of_measurement: seconds
+    alert_notify_service:
+      name: Alert Notify Service (suspicious-late rejections)
+      description: >-
+        Added 2026-09-09 (rejected-blip classification). Notify service
+        for the one-shot push sent when a rejected blip is classified
+        SUSPICIOUS-LATE (belief may be inverted; see the blueprint
+        description). Standard push only — never an iOS critical
+        notification (that escalation belongs to the drift watchdog).
+        The default reuses the phone every room's drift watchdog
+        already pages (notify.mobile_app_clements_iphone), so existing
+        instances gain the alert without config edits. Empty string
+        disables the push for this room; the classified logbook entry
+        is always written regardless.
+      default: notify.mobile_app_clements_iphone
+      selector:
+        text:
 
 variables:
   temp_sensor_id: !input temp_sensor
@@ -147,6 +208,8 @@ variables:
   refractory_seconds: !input refractory_seconds
   gateway_switch_id: !input gateway_switch
   correlation_seconds: !input correlation_seconds
+  late_lookback_seconds: !input late_lookback_seconds
+  alert_notify_service: !input alert_notify_service
 
 triggers:
   - trigger: state
@@ -219,10 +282,53 @@ actions:
         target:
           entity_id: !input cooling_active
     else:
-      # One entry per ignored blip (the pair's second value never reaches
-      # here — the pair-staleness condition drops it), so a phantom event
-      # logs once and cooling_active is untouched. Tracked via logbook to
-      # watch gateway hiccup frequency without paging anyone.
+      # Rejected-blip classification (2026-09-09): a rejection is exactly
+      # the moment belief may have diverged, so this path no longer fails
+      # silent. One entry per ignored blip (the pair's second value never
+      # reaches here — the pair-staleness condition drops it), and
+      # cooling_active is untouched throughout.
+      #   suspicious-late — the switch actuated within the lookback AND
+      #     cooling_active has not been written since that actuation: the
+      #     rejected blip is almost certainly that press's only feedback,
+      #     so the press landed physically but was never booked and belief
+      #     is likely inverted (living 13:03 / nursery 14:37 HKT
+      #     2026-09-09). Logbook + one standard push.
+      #   duplicate-refire — an actuation within the lookback but
+      #     cooling_active was written after it: the press's real feedback
+      #     already booked (or another writer corrected belief), so this is
+      #     the known ~30 s stale re-fire. Logbook only.
+      #   phantom — no actuation within the lookback (or the switch entity
+      #     is missing: fail closed, a visible misconfiguration): a
+      #     reconnect/state-refresh replay, the class the gate exists to
+      #     reject; belief is fine. Logbook only, never pages.
+      # The accept gate's one-sided bound books every delta < window
+      # (including negative), so delta here is always >= the window.
+      # Known residuals, accepted: a gateway re-fire ~30-45 s after an
+      # UNBOOKED rejection repeats the suspicious push (a distinct
+      # rejection event; 0 observed in the 2026-09-06..09-09 replay); a
+      # non-listener cooling_active write between actuation and blip
+      # classifies the rejection duplicate-refire and suppresses the push
+      # (belief was just corrected — lower risk); an HA restart resets the
+      # switch's last_changed, so a late blip within the lookback of a
+      # restart can page against the startup resync press's actuation.
+      - variables:
+          reject_switch_missing: "{{ states[gateway_switch_id] is none }}"
+          reject_delta: >-
+            {{ 0 if reject_switch_missing
+            else ((trigger.to_state.last_changed
+                   - states[gateway_switch_id].last_changed)
+                  .total_seconds() | round(1)) }}
+          reject_booked_since: >-
+            {{ not reject_switch_missing
+            and states[cooling_active_id] is not none
+            and states[cooling_active_id].last_changed
+                > states[gateway_switch_id].last_changed }}
+          reject_class: >-
+            {{ 'phantom' if (reject_switch_missing
+                             or reject_delta | float
+                                >= late_lookback_seconds | float)
+            else ('duplicate-refire' if reject_booked_since
+                  else 'suspicious-late') }}
       - action: logbook.log
         data:
           name: "{{ this.attributes.friendly_name }}"
@@ -233,9 +339,43 @@ actions:
             {{ trigger.to_state.last_changed.isoformat() }} — press switch
             {{ gateway_switch_id }}
             {{ 'not found' if sw is none else 'last actuated ' ~
-               ((trigger.to_state.last_changed - sw.last_changed)
-                .total_seconds() | round(1)) ~ ' s before the blip' }}
-            (window {{ correlation_seconds }} s); no press booked.
+               reject_delta ~ ' s before the blip' }}
+            (window {{ correlation_seconds }} s); no press booked;
+            classified {{ reject_class }}
+            {{- ' (no cooling_active write since the actuation — belief may
+            be inverted; push sent)' if reject_class == 'suspicious-late'
+               and alert_notify_service | trim != ''
+            else ' (no cooling_active write since the actuation — belief
+            may be inverted; push disabled)'
+               if reject_class == 'suspicious-late'
+            else ' (cooling_active already written since the actuation)'
+               if reject_class == 'duplicate-refire'
+            else ' (no commanded actuation within ' ~ late_lookback_seconds
+               ~ ' s)' }}.
+      - if:
+          - condition: template
+            value_template: >-
+              {{ reject_class == 'suspicious-late'
+              and alert_notify_service | trim != '' }}
+        then:
+          # Standard push only — never critical (that escalation belongs
+          # to the drift watchdog). One push per rejection event.
+          - action: "{{ alert_notify_service | trim }}"
+            data:
+              title: >-
+                HVAC belief may be inverted:
+                {{ this.attributes.friendly_name }}
+              message: >-
+                Press blip '{{ trigger.to_state.state }}' landed
+                {{ reject_delta }} s after the last commanded actuation of
+                {{ gateway_switch_id }} (actuated
+                {{ states[gateway_switch_id].last_changed.isoformat() }},
+                blip {{ trigger.to_state.last_changed.isoformat() }}) —
+                outside the {{ correlation_seconds }} s window, and no
+                press has been booked since the actuation. The press
+                likely landed physically but was not counted, so cooling
+                belief may be inverted. Check the unit and reconcile
+                cooling_active if needed.
 
 # Queued so that close-together triggers are evaluated in order rather
 # than dropped; note the refractory window means only the first booking

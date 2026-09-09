@@ -23,7 +23,8 @@ blueprint:
     would otherwise book a phantom press. Finally, a correlation gate
     (2026-09-09): a press-shaped blip books a press ONLY if the slot's
     gateway press switch changed state within correlation_seconds
-    (default 60) before the blip — every commanded press path
+    (default 720 since the 2026-09-09 widening; originally 60) before
+    the blip — every commanded press path
     (thermostat loop, startup resync, manual HA/app press) actuates
     that switch first, while a gateway reconnect/state-refresh replay
     emits blips with no switch actuation at all (2026-09-09 05:58 HKT
@@ -50,9 +51,25 @@ blueprint:
     press's real feedback already booked, this is the known ~30 s
     stale re-fire) and PHANTOM (no actuation within the lookback — a
     gateway reconnect/state-refresh replay, the class the gate exists
-    to reject; belief is fine) stay logbook-only and never page. The
-    60 s correlation window is unchanged: this adds observability on
-    the rejected path only, and the accepted-press path is untouched.
+    to reject; belief is fine) stay logbook-only and never page.
+    Widened window + first-feedback accept guard (2026-09-09,
+    Clement's ruling after the same two inversions): latency beyond
+    60 s is chronic under gateway backlog, not anomalous — a 5.5-day
+    replay (2026-09-04..09-09, all five rooms) measured ~37
+    genuine-late first-feedback blips/day house-wide (deltas
+    60-661 s), every one a real commanded press whose rejection left
+    belief inverted — so late-but-genuine feedback is now ACCEPTED at
+    the source. A blip books a press when the press switch actuated
+    within Correlation Window seconds (default 720) AND
+    cooling_active has NOT been written since that actuation
+    (first-feedback-only guard: a press's first feedback books it,
+    which makes every later duplicate/replay blip trailing that press
+    reject — this is what makes the wide window safe). Duplicate
+    re-fires and phantom replays stay rejected exactly as before; the
+    SUSPICIOUS-LATE page now fires only for an unbooked blip beyond
+    the widened window but inside the lookback, making it the rare
+    genuine-anomaly signal (~0/day in the replay) instead of ~37/day
+    noise.
   domain: automation
   source_url: https://github.com/panghy/ha-blueprints/blob/main/hvac_press_listener.yaml
   input:
@@ -142,21 +159,29 @@ blueprint:
       name: Correlation Window
       description: >-
         Seconds after a press-switch actuation during which a blip is
-        accepted as that press's confirmation. Observed command-to-blip
-        latency is typically a few seconds to ~40 s (2026-09-08: 40.0 s
-        on the nursery 23:37 UTC press), but has historically reached
-        8+ minutes under gateway backlog; a blip later than this window
-        is deliberately MISSED (bookkeeping unchanged, logbook entry
-        written) and left to reconciliation/the drift watchdog — a
-        phantom booked from a reconnect replay inverts the belief and
-        actively fights the room, while a miss is self-healing. Do not
-        raise far above the default: the wider the window, the more a
-        reconnect burst trailing a real press can alias into it.
-      default: 60
+        accepted as that press's confirmation, subject to the
+        first-feedback guard (no cooling_active write since the
+        actuation). Widened 60 -> 720 on 2026-09-09 (Clement's
+        ruling): observed command-to-blip latency is typically a few
+        seconds to ~40 s, but under gateway backlog routinely runs
+        minutes — a 5.5-day replay (2026-09-04..09-09, all five
+        rooms) measured 205 genuine-late first-feedback blips (p50
+        146 s, p95 515 s, max 660.7 s), every one a real commanded
+        press whose rejection left belief inverted until
+        reconciliation/the watchdog. 720 s is the smallest round
+        window covering that entire observed distribution with
+        margin (600 s would have missed the 660.7 s event). The old
+        aliasing concern (a reconnect burst trailing a real press
+        booking twice) is retired by the first-feedback guard: once
+        a press's first feedback books, every later blip trailing
+        that press rejects as duplicate-refire. Keep this below Late
+        Feedback Lookback — blips beyond this window but inside the
+        lookback are the suspicious-late page band.
+      default: 720
       selector:
         number:
           min: 5
-          max: 600
+          max: 900
           step: 1
           unit_of_measurement: seconds
     late_lookback_seconds:
@@ -176,7 +201,13 @@ blueprint:
         belief is likely inverted. Beyond the lookback a rejected blip
         has no plausible commanding press and is classified a phantom
         replay (log-only). The default of 900 covers every observed
-        genuine-late delta with margin.
+        genuine-late delta with margin. Since the 2026-09-09 window
+        widening, blips inside the correlation window (default 720)
+        with no booking since the actuation are ACCEPTED, so
+        suspicious-late only fires in the band between the window and
+        this lookback — the rare genuine-anomaly signal (~0/day in
+        the 2026-09-04..09-09 replay). Keep this above Correlation
+        Window or the page band vanishes.
       default: 900
       selector:
         number:
@@ -261,13 +292,26 @@ actions:
   # start after a NEWER press command lands, making the delta negative for
   # the prior press's blip — still evidence of a commanded press, so it
   # books. A missing/renamed switch entity fails closed into the log path.
+  # First-feedback guard (2026-09-09 widening): acceptance additionally
+  # requires that cooling_active has NOT been written since the switch
+  # actuation — the booking a press's first feedback writes makes every
+  # later blip trailing that press (stale re-fire, reconnect replay)
+  # reject as duplicate-refire, so widening the window cannot
+  # double-book. A missing cooling_active entity does not block (same
+  # stance as the refractory condition); belief corrections by other
+  # writers (reconciliation) count as bookings and suppress acceptance
+  # until the next commanded press — a miss the watchdog recovers
+  # (miss-tolerant, phantom-intolerant, unchanged).
   - if:
       - condition: template
         value_template: >-
           {{ states[gateway_switch_id] is not none
           and (trigger.to_state.last_changed
                - states[gateway_switch_id].last_changed).total_seconds()
-             < correlation_seconds }}
+             < correlation_seconds
+          and not (states[cooling_active_id] is not none
+                   and states[cooling_active_id].last_changed
+                       > states[gateway_switch_id].last_changed) }}
     then:
       # Snapshot first, then toggle: reconciliation compares against the
       # temperature at the moment the press landed.
@@ -287,22 +331,32 @@ actions:
       # silent. One entry per ignored blip (the pair's second value never
       # reaches here — the pair-staleness condition drops it), and
       # cooling_active is untouched throughout.
-      #   suspicious-late — the switch actuated within the lookback AND
-      #     cooling_active has not been written since that actuation: the
-      #     rejected blip is almost certainly that press's only feedback,
-      #     so the press landed physically but was never booked and belief
-      #     is likely inverted (living 13:03 / nursery 14:37 HKT
-      #     2026-09-09). Logbook + one standard push.
+      #   suspicious-late — the switch actuated within the lookback (but
+      #     beyond the correlation window, or the accept gate would have
+      #     booked it) AND cooling_active has not been written since that
+      #     actuation: the rejected blip is almost certainly that press's
+      #     only feedback, so the press landed physically but was never
+      #     booked and belief is likely inverted. Since the 2026-09-09
+      #     widening this is the rare genuine-anomaly band
+      #     (window..lookback, default 720..900 s; ~0/day in the
+      #     2026-09-04..09-09 replay — the incidents that motivated the
+      #     class, living 121.7 s / nursery 543.5 s, are now ACCEPTED by
+      #     the widened gate instead). Logbook + one standard push.
       #   duplicate-refire — an actuation within the lookback but
       #     cooling_active was written after it: the press's real feedback
       #     already booked (or another writer corrected belief), so this is
-      #     the known ~30 s stale re-fire. Logbook only.
+      #     the known ~30 s stale re-fire. Since the widening this also
+      #     covers any delta below the window rejected by the
+      #     first-feedback guard. Logbook only.
       #   phantom — no actuation within the lookback (or the switch entity
       #     is missing: fail closed, a visible misconfiguration): a
       #     reconnect/state-refresh replay, the class the gate exists to
       #     reject; belief is fine. Logbook only, never pages.
-      # The accept gate's one-sided bound books every delta < window
-      # (including negative), so delta here is always >= the window.
+      # The accept gate books any delta < window with no booking since
+      # the actuation, so a rejection here is booked-since
+      # (duplicate-refire, any delta), beyond the window (suspicious-late
+      # up to the lookback), or beyond the lookback / switch missing
+      # (phantom).
       # Known residuals, accepted: a gateway re-fire ~30-45 s after an
       # UNBOOKED rejection repeats the suspicious push (a distinct
       # rejection event; 0 observed in the 2026-09-06..09-09 replay); a

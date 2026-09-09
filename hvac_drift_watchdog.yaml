@@ -1,7 +1,13 @@
 blueprint:
   name: HVAC Drift Watchdog
   description: >-
-    Detects the "impossible unless desynced" signature: the belief state says
+    Detects belief-vs-reality desync in both directions. The FORWARD branch
+    (believed OFF / actually ON) is the original watchdog; the REVERSE branch
+    (believed ON / actually OFF) is opt-in per instance and described at the
+    end of this text.
+
+    FORWARD BRANCH — the "impossible unless desynced" signature: the belief
+    state says
     cooling is OFF while the room temperature is low enough to be explainable
     only by a stuck-on AC and is not recovering. All the wall AC units are
     set to 20°C, so a genuinely stuck-on AC drags the room toward ~20°C or
@@ -22,6 +28,84 @@ blueprint:
     spamming. Optional escalation inputs: a second phone notify service, iOS
     CRITICAL push (bypasses DND/silent), and a TTS announcement on a media
     player gated on an input_boolean (e.g. only while sleep mode is on).
+
+    REVERSE BRANCH (believed ON / actually OFF) — the mirror failure: the loop
+    commanded cooling on, the belief flag says ON, but the room never cools
+    because the unit is physically off or has failed. Motivating case, the
+    2026-09-08 afternoon nursery overheat: the nap arm lowered target 26.5 ->
+    21.0 at 12:31 HKT, cooling_active toggled ON at 12:38 with temp_at_toggle
+    22.8, and over the following 58-minute ON stretch the room ROSE 22.8 ->
+    23.3 (+0.5 above the toggle temperature, +2.3 above target) with a single
+    0.1° dip; the loop gave up at 13:36 and a re-press then produced real
+    cooling. Only the out-of-range guardrail caught it, ~30 min late.
+    The branch is DISABLED unless the optional temp_at_toggle input is wired,
+    so existing instances keep their forward-only behavior with no config
+    change. When wired, five gates must all pass: (1) cooling_active has been
+    ON for reverse_minutes — a floor that excludes short compressor cycles,
+    NOT an abnormal duration in itself (long healthy ON stretches are routine
+    here: 42 stretches >= 45 min in the 7 days to 2026-09-09, the master
+    bedroom's running for hours), so this gate admits a window rather than
+    discriminating within it; (2) the room sits at least reverse_above_target
+    above target, clear of the ±0.3°C cycling band; (3) the room has NOT
+    fallen reverse_min_drop below the temperature recorded at the ON toggle —
+    the load-bearing gate, since a working unit is removing heat and a failed
+    one is not; (4) the trend gradient is not falling faster than
+    reverse_max_fall_rate, a second independent read on the same question
+    that stays silent through a normal pull-down and fail-quiets when the
+    gradient is unavailable; and (5) the same setpoint grace as the forward
+    branch, because right after a setpoint LOWER the room legitimately sits
+    above the new target with no drop yet.
+    Calibration and false-alarm evidence — a per-5-minute replay of all five
+    gates over 2026-09-02..09-09 across all five rooms (42 stretches cleared
+    gate 1; 41 had complete sensor data at the mark and form the replay set)
+    yielded 23 alerting ticks in 5 episodes as of the 2026-09-09T05:00Z cut,
+    every one carrying
+    the failure-to-cool signature: nursery 09-05 14:35Z (believed ON 65 min,
+    room risen 22.6 -> 23.0 against a 22.0 target; a re-press at 15:14 then
+    pulled it down 0.8°C in 30 min and 1.3°C in 39 — a real desync nothing
+    detected at the time, since +1.0 stayed inside the guardrail's ±1.5
+    band), nursery 09-08 05:25Z (the case above; first alert 47 min into the
+    stretch, ~35 min before the guardrail), dining room 09-08 08:40Z
+    (24.3 -> 25.1 while believed ON) and 09-09 02:00Z, and living room
+    09-09 04:25Z (believed ON 46 min, 23.9 against a 23.0 target stable
+    since 03:01Z, 0.2°C above its toggle temperature). Study and master
+    bedroom produce zero ticks. Read the tick count as a dated snapshot, not
+    a closed total: the living room episode was still alerting at the cut, so
+    its 8 ticks are a floor. The living room episode is the high-load
+    plateau case reverse_above_target warns about, and it cannot be
+    adjudicated from history: these units are IR-driven with no power or
+    hvac_action feedback — the absence this watchdog exists to cover — so it
+    is counted as a signature match, not a confirmed failure.
+    Two near-misses, each held quiet by one gate alone: the nursery's own
+    09-08 05:45 recovery cycle had fallen exactly 0.5°C at the mark, so
+    gate 3 passed and gate 4 stopped it (room falling 1.2°C/h at that tick);
+    and the study's 09-04 09:35Z stretch sat 0.1°C ABOVE its toggle
+    temperature for 64 min with gates 1, 3, 4 and the grace all
+    failure-side, held by gate 2 and only by 0.1°C. Every gate is
+    load-bearing on some real stretch from this one week.
+    Provenance: the nursery numbers come from
+    sensor.xiaomi_cn_2049615892_mp6_temperature_p_3_2, the air purifier sensor
+    the watchdog actually read until the 2026-09-08 ~22:02 HKT swap to the
+    crib-level probe; sensor.nursery_temperature has no history before
+    2026-09-08T14:02:52Z because that template helper was created then, so
+    incident-era values must be re-derived from the purifier entity. Their
+    offset is small and not constant: the purifier runs -0.4 to +1.3°C
+    against the probe (median +0.2) across their shared history and the two
+    read within 0.1°C of each other now, so the ~1.2°C seen at the swap
+    moment reflects vertical stratification under cooling rather than a fixed
+    bias — gaps of 1.0°C or more recur whenever the room is being pulled
+    down hard, the purifier sitting higher in the room than the crib. It does not
+    affect the gates either way — 2-4 are all differences (temp - target,
+    temp - toggle, gradient) and the targets were rescaled with the sensor
+    (22.0 -> 21.0 asleep), so the thresholds carry across the swap unchanged.
+    Replay gradients are a 30-minute endpoint delta, not the trend helper's
+    least-squares fit.
+    The two branches are mutually exclusive by construction (belief OFF vs ON)
+    and share the escalation inputs and the repeat-notify throttle — so an
+    alert in one direction also suppresses the other for renotify_minutes,
+    which is intended (one "go look at the AC" push per window) but does mean
+    a room that genuinely flips belief state inside that window reports only
+    the first direction.
   domain: automation
   source_url: https://github.com/panghy/ha-blueprints/blob/main/hvac_drift_watchdog.yaml
   input:
@@ -203,6 +287,137 @@ blueprint:
       default: ""
       selector:
         text:
+    temp_at_toggle:
+      name: Temperature At Toggle (optional, enables the reverse branch)
+      description: >-
+        The input_number the HVAC loop writes with the room temperature at
+        the moment it toggled the AC (e.g.
+        input_number.nursery_hvac_temp_at_toggle). This is the ONLY switch
+        for the reverse branch (believed ON / actually OFF): empty string
+        leaves the instance forward-only, exactly as before, so existing
+        instances stay valid and quiet with no config change. Wiring it turns
+        the branch on, because it is also the branch's baseline — the room's
+        temperature when cooling was commanded, which a working unit must
+        pull down. Unknown/unavailable suppresses the branch (fail-quiet).
+        Accuracy of this value is the loop's job, not the blueprint's: on a
+        quick OFF/ON re-press the loop was twice observed leaving the older
+        toggle value in place (e.g. study 2026-09-04, ON at 09:35 still
+        carrying the 09:22 reading). A stale COOLER baseline only makes this
+        branch harder to trip, but a stale WARMER one would mask a real
+        failure by making the room look as though it had already fallen, so
+        prefer a loop that writes it on every ON transition.
+      default: ""
+      selector:
+        text:
+    reverse_minutes:
+      name: Reverse Branch Duration
+      description: >-
+        How long (minutes) cooling_active must have been ON, with the room
+        failing to cool, before the reverse branch alerts. This is a floor
+        that excludes short compressor cycles, not a duration that is
+        abnormal by itself: long healthy ON stretches are routine on this
+        house — in the 7 days to 2026-09-09 there were 42 stretches >= 45 min
+        (nursery 14, longest 113; study 8, longest 115; master bedroom 9,
+        running for hours at an 18°C target; living room 5; dining room 6),
+        against a median stretch well under 20 min. So do NOT read a healthy
+        room clearing this gate as a problem, and do not tune it expecting to
+        separate healthy from failed operation — gates 2-4 do that (of those
+        42 stretches only 5 yield alerting episodes).
+        The default of 45 matches the setpoint grace so the two gates clear
+        together, and sits above the trend helper's 30-min window so the
+        gradient in gate 4 is fully populated by the time it is read.
+      default: 45
+      selector:
+        number:
+          min: 20
+          max: 120
+          step: 5
+          unit_of_measurement: minutes
+    reverse_above_target:
+      name: Reverse Branch Above-Target Margin
+      description: >-
+        How far above target (°C) the room must sit for the reverse branch to
+        alert. Normal cycling oscillates roughly ±0.3°C around the setpoint,
+        so this must clear that band; the 2026-09-08 nursery desync sat
+        +2.3°C above target. The default of 0.8 is the cycling band plus
+        headroom, which deliberately ignores mild overshoots (those are the
+        out-of-range guardrail's job). This is the input to raise for a
+        high-load room: a unit that is working but losing to heat gain
+        (guests, west sun, a crowd-mode target change in the living room) can
+        plateau above target with little drop and no visible fall, which is
+        indistinguishable from a failure on these three signals. That is not
+        hypothetical here — the living room entered exactly that state on
+        2026-09-09 at 04:25Z (+0.9 above a target stable since 03:01Z, 0.2°C
+        above its toggle temperature, 46 min into a believed-ON stretch) and
+        would have alerted had it been wired. Because these IR-driven units
+        report no power draw or hvac_action, history cannot settle whether
+        that unit was running, so treat this as the live false-alarm risk:
+        wire high-load rooms last, and raise this margin before touching the
+        drop gate.
+      default: 0.8
+      selector:
+        number:
+          min: 0.3
+          max: 3.0
+          step: 0.1
+          unit_of_measurement: "°C"
+    reverse_min_drop:
+      name: Reverse Branch Minimum Drop
+      description: >-
+        How far (°C) the room must have fallen below temp_at_toggle to count
+        as actually cooling. The reverse branch alerts only while the room is
+        still at or above (temp_at_toggle - this margin). It is the strongest
+        single signal, but it is not a clean separator. Measured at the
+        45-min mark across the 41 replayable long ON stretches in the week to
+        2026-09-09, non-alerting stretches ran from 0.1°C ABOVE the toggle
+        temperature to 6.7°C below it (typically ~1.0-1.5°C below in the
+        nursery, 5-6°C in the master bedroom pulling to 18°C), while the
+        failure episodes sat 0.0-0.3°C above it. The failure side is tight,
+        but the two ranges touch: the study's 09-04 09:35Z stretch sat 0.1°C
+        above its own toggle for 64 min and was held quiet by gate 2 alone,
+        0.1°C short of the above-target margin — not by this gate. So the
+        default of 0.5 is not the middle of a gap; it sits just on the
+        healthy side of the failure cluster so a slow-but-real pull-down is
+        not accused, and it leans on gates 2 and 4 to cover the overlap. The
+        nursery's 09-08 05:45 recovery cycle, which had fallen exactly
+        0.5°C, passes this gate and is held quiet by gate 4 instead.
+      default: 0.5
+      selector:
+        number:
+          min: 0.1
+          max: 2.0
+          step: 0.1
+          unit_of_measurement: "°C"
+    reverse_max_fall_rate:
+      name: Reverse Branch Maximum Falling Rate
+      description: >-
+        The reverse branch stays silent while the trend gradient is falling
+        faster than this (°C/hour), so a room that is visibly pulling down
+        never alerts even if the other gates pass — including the case gate 3
+        lets through, a room that has only just started to fall. Measured as
+        a 30-min endpoint delta at the 45-min mark, non-alerting PULL-DOWNS
+        fell at 0.6-6.0°C/hour while the failure episodes ran -0.2 to
+        +0.8°C/hour, i.e. flat, drifting or rising. Not every non-alerting
+        stretch was falling — the study's 09-04 09:35Z stretch was rising at
+        +0.6°C/hour at its mark and is held quiet by gate 2 (above target by
+        0.7, short of 0.8), not by this one — so the 0.6 floor describes
+        only the rooms that were cooling, which is
+        the population this gate has to clear. The default of 0.5 sits
+        between them, but the margin is thin at the slow end: the living
+        room's 09-08 07:43Z stretch fell at just 0.6°C/hour, clearing the
+        default by 0.1. Lower this only with that in mind — a room that cools
+        slowly (small unit, high load, weak airflow) is the one this gate can
+        mistake for a failure, and gate 3 is what covers it there. If the
+        gradient attribute is missing (trend helper unknown/unavailable, e.g.
+        just after a reload or restart, or before it accrues min_samples) the
+        branch holds quietly.
+      default: 0.5
+      selector:
+        number:
+          min: 0.1
+          max: 3.0
+          step: 0.1
+          unit_of_measurement: "°C/h"
 
 variables:
   temp_sensor_id: !input temp_sensor
@@ -227,6 +442,27 @@ variables:
   target: "{{ states(target_temp_id) | float(0) }}"
   temp_available: "{{ states(temp_sensor_id) not in ['unknown', 'unavailable'] }}"
   target_available: "{{ states(target_temp_id) not in ['unknown', 'unavailable'] }}"
+  # Reverse branch (believed ON / actually OFF). Wiring temp_at_toggle is the
+  # only switch: left empty the branch can never pass its first gate, so an
+  # instance that predates it keeps its forward-only behavior untouched.
+  # Every read of it is guarded by reverse_enabled behind Jinja's
+  # short-circuiting `and`. Note which form is dangerous: states('') returns
+  # 'unknown' harmlessly, but the subscript form states[''] raises
+  # TemplateError ("Invalid domain name ''"). The guards are what make
+  # toggle_temp fail closed at 99 and toggle_temp_available false on an
+  # unwired instance, so keep them even though the function form is benign.
+  temp_at_toggle_input: !input temp_at_toggle
+  reverse_above_target: !input reverse_above_target
+  reverse_min_drop: !input reverse_min_drop
+  reverse_max_fall_rate: !input reverse_max_fall_rate
+  temp_at_toggle_id: "{{ temp_at_toggle_input | trim }}"
+  reverse_enabled: "{{ temp_at_toggle_id != '' }}"
+  # 99 makes the no-drop gate fail closed when the helper cannot be read.
+  toggle_temp: >-
+    {{ states(temp_at_toggle_id) | float(99) if reverse_enabled else 99 }}
+  toggle_temp_available: >-
+    {{ reverse_enabled
+    and states(temp_at_toggle_id) not in ['unknown', 'unavailable'] }}
 
 triggers:
   - trigger: time_pattern
@@ -237,48 +473,123 @@ conditions:
     entity_id: !input hvac_mode_select
     state:
       - Cooling
-  # Belief has said "off" for the whole drift window...
-  - condition: state
-    entity_id: !input cooling_active
-    state: "off"
-    for:
-      minutes: !input drift_minutes
-  # ...yet the room is pinned well below target: impossible in summer
-  # without active cooling.
-  - condition: template
-    value_template: >-
-      {{ temp_available and target_available
-      and current_temp <= (target - drift_threshold) }}
-  # ...AND the room is cold enough for a stuck-on AC to be the explanation.
-  # The wall units are set to 20°C: real desyncs pin the room at 18-21.5°C.
-  # A room at 23°C under a raised setpoint (e.g. target 24/25) is below
-  # target but physically incompatible with a stuck-on AC — never alert.
-  - condition: template
-    value_template: "{{ current_temp <= stuck_on_ceiling }}"
-  # ...AND the temperature is not rising. A stuck-on AC holds the room flat
-  # or falling; a merely-cool room in August drifts upward. Trend sensor
-  # unknown/unavailable suppresses the alert (fail-quiet: real desyncs last
-  # hours, a settled trend sensor still catches them).
-  - condition: state
-    entity_id: !input temp_trend
-    state: "off"
-  # ...AND the target setpoint has been unchanged for the grace period —
-  # direction-agnostic: any value change (raise OR lower, e.g. an away
-  # setback) arms the grace. The motivating case was a raise (07:00 wake
-  # routine: nursery 21 -> 24) leaving the room below the new target near
-  # the ceiling while the lagging 30-min trend window still read
-  # not-rising. A real stuck-on AC persists for hours; deferring the alert
-  # loses nothing. Same-value writes preserve last_changed and do not
-  # re-arm; an HA restart writes the restored state fresh, suppressing for
-  # up to one full grace period post-restart (fail-quiet, bounded). The
-  # none-guard makes this self-contained rather than relying on the
-  # target_available gate above.
-  - condition: template
-    value_template: >-
-      {{ states[target_temp_id] is not none
-      and (now() - states[target_temp_id].last_changed).total_seconds()
-      >= setpoint_grace_minutes | float * 60 }}
-  # Throttle: skip if this automation alerted recently.
+  # Either direction of desync may alert. The two branches are mutually
+  # exclusive by construction — the forward gate needs the belief flag OFF
+  # for the drift window, the reverse gate needs it ON for the reverse
+  # window — so at most one can pass on a given tick, and `actions` re-reads
+  # the flag to pick the matching alert.
+  - condition: or
+    conditions:
+      # FORWARD BRANCH: believed OFF / actually ON. Gates unchanged.
+      - condition: and
+        conditions:
+          # Belief has said "off" for the whole drift window...
+          - condition: state
+            entity_id: !input cooling_active
+            state: "off"
+            for:
+              minutes: !input drift_minutes
+          # ...yet the room is pinned well below target: impossible in summer
+          # without active cooling.
+          - condition: template
+            value_template: >-
+              {{ temp_available and target_available
+              and current_temp <= (target - drift_threshold) }}
+          # ...AND the room is cold enough for a stuck-on AC to be the
+          # explanation. The wall units are set to 20°C: real desyncs pin the
+          # room at 18-21.5°C. A room at 23°C under a raised setpoint (e.g.
+          # target 24/25) is below target but physically incompatible with a
+          # stuck-on AC — never alert.
+          - condition: template
+            value_template: "{{ current_temp <= stuck_on_ceiling }}"
+          # ...AND the temperature is not rising. A stuck-on AC holds the room
+          # flat or falling; a merely-cool room in August drifts upward. Trend
+          # sensor unknown/unavailable suppresses the alert (fail-quiet: real
+          # desyncs last hours, a settled trend sensor still catches them).
+          - condition: state
+            entity_id: !input temp_trend
+            state: "off"
+          # ...AND the target setpoint has been unchanged for the grace
+          # period — direction-agnostic: any value change (raise OR lower,
+          # e.g. an away setback) arms the grace. The motivating case was a
+          # raise (07:00 wake routine: nursery 21 -> 24) leaving the room
+          # below the new target near the ceiling while the lagging 30-min
+          # trend window still read not-rising. A real stuck-on AC persists
+          # for hours; deferring the alert loses nothing. Same-value writes
+          # preserve last_changed and do not re-arm; an HA restart writes the
+          # restored state fresh, suppressing for up to one full grace period
+          # post-restart (fail-quiet, bounded). The none-guard makes this
+          # self-contained rather than relying on the target_available gate
+          # above.
+          - condition: template
+            value_template: >-
+              {{ states[target_temp_id] is not none
+              and (now() - states[target_temp_id].last_changed).total_seconds()
+              >= setpoint_grace_minutes | float * 60 }}
+      # REVERSE BRANCH: believed ON / actually OFF. Inert on any instance
+      # that has not wired temp_at_toggle.
+      - condition: and
+        conditions:
+          # Wired, and every reading needed is trustworthy. The nursery's
+          # canonical sensor reports unknown by design once the crib probe
+          # goes stale, so this is the fail-quiet path, not an error path.
+          - condition: template
+            value_template: >-
+              {{ reverse_enabled and temp_available and target_available
+              and toggle_temp_available }}
+          # Belief has said "on" long enough that a working unit would have
+          # made visible progress. This only excludes short cycles — healthy
+          # stretches routinely run past it here (42 were >= 45 min in the 7
+          # days to 2026-09-09), so the gates below do the discriminating...
+          - condition: state
+            entity_id: !input cooling_active
+            state: "on"
+            for:
+              minutes: !input reverse_minutes
+          # ...yet the room sits clear of the ±0.3°C cycling band above
+          # target (2026-09-08 nursery: +2.3°C)...
+          - condition: template
+            value_template: "{{ current_temp >= (target + reverse_above_target) }}"
+          # ...AND it has not fallen from where it stood when cooling was
+          # commanded, so nothing is being removed from the room. The
+          # strongest single signal, though not a clean separator: at the
+          # 45-min mark the replayed failure episodes sat 0.0-0.3°C ABOVE the
+          # toggle temperature while non-alerting stretches ran from 0.1°C
+          # above it to 6.7°C below, so the ranges touch (study 09-04 09:35Z
+          # sat 0.1 above and was held by the gate ABOVE this one, by 0.1°C).
+          - condition: template
+            value_template: "{{ current_temp >= (toggle_temp - reverse_min_drop) }}"
+          # ...AND the room is not visibly pulling down right now — a second,
+          # independent read on the same question via the trend gradient
+          # (non-alerting pull-downs fell at 0.6-6.0°C/h, the failure episodes
+          # ran -0.2 to +0.8°C/h). This is what holds the borderline case
+          # quiet: the nursery's 09-08 05:45 recovery cycle passed the gate
+          # above with a drop of exactly 0.5°C and was stopped here. A
+          # missing gradient (trend helper unknown/unavailable after a reload
+          # or restart) holds the branch quiet.
+          - condition: template
+            value_template: >-
+              {{ state_attr(temp_trend_id, 'gradient') is not none
+              and (state_attr(temp_trend_id, 'gradient') | float(0)) * 3600
+              >= -(reverse_max_fall_rate | float) }}
+          # ...AND the setpoint has been stable for the same grace period the
+          # forward branch uses. Right after a LOWER (nap arm, pre-cool tier)
+          # the room legitimately sits above the new target with no drop yet:
+          # on 2026-09-08 the nap arm dropped the nursery to 21.0 six minutes
+          # before the ON toggle, so the pull-down window itself would
+          # otherwise alert. A unit that is physically off stays off for
+          # hours; deferring loses nothing.
+          - condition: template
+            value_template: >-
+              {{ states[target_temp_id] is not none
+              and (now() - states[target_temp_id].last_changed).total_seconds()
+              >= setpoint_grace_minutes | float * 60 }}
+  # Throttle: skip if this automation alerted recently. Shared by both
+  # branches — a room only ever needs one "go look at the AC" push per
+  # window, and the branches cannot both be true on one tick. Consequence
+  # worth knowing: an alert in one direction also silences the other for
+  # renotify_minutes, so a room that genuinely flips belief state inside
+  # that window reports only the direction that fired first.
   - condition: template
     value_template: >-
       {{ this.attributes.last_triggered is none
@@ -286,56 +597,134 @@ conditions:
       > (renotify_minutes | float * 60) }}
 
 actions:
-  - action: persistent_notification.create
-    data:
-      notification_id: "hvac_drift_{{ this.entity_id }}"
-      title: "HVAC desync suspected: {{ room_name }}"
-      message: >-
-        {{ room_name }} is {{ current_temp }}°C, {{
-        (target - current_temp) | round(1) }}°C below target {{ target }}°C,
-        but cooling_active has been off for
-        {{ ((now() - states[cooling_active_id].last_changed).total_seconds()
-        / 60) | int }} minutes (trend: {{ states(temp_trend_id) }}, gradient
-        {{ state_attr(temp_trend_id, 'gradient') }}).
-        The AC is likely physically ON while HA believes it is OFF.
-        Reconcile: check the room, press the AC power if needed, and make
-        sure the cooling_active boolean matches reality.
-  - action: "{{ notify_service }}"
-    data:
-      title: "HVAC desync suspected: {{ room_name }}"
-      message: >-
-        {{ room_name }}: {{ current_temp }}°C vs target {{ target }}°C with
-        cooling believed OFF and temp not rising. AC probably stuck ON —
-        needs a manual check.
-      data: "{{ push_data }}"
-  # Optional second phone (skipped when notify_service_2 is empty).
-  - if:
-      - condition: template
-        value_template: "{{ notify_service_2 | trim != '' }}"
-    then:
-      - action: "{{ notify_service_2 | trim }}"
-        data:
-          title: "HVAC desync suspected: {{ room_name }}"
-          message: >-
-            {{ room_name }}: {{ current_temp }}°C vs target {{ target }}°C
-            with cooling believed OFF and temp not rising. AC probably stuck
-            ON — needs a manual check.
-          data: "{{ push_data }}"
-  # Optional TTS announcement, gated on the tts_gate boolean when set.
-  - if:
-      - condition: template
-        value_template: >-
-          {{ tts_media_player | trim != ''
-          and (tts_gate | trim == '' or is_state(tts_gate | trim, 'on')) }}
-    then:
-      - action: tts.cloud_say
-        data:
-          cache: false
-          entity_id: "{{ tts_media_player | trim }}"
-          message: >-
-            Attention: possible H V A C desync in the {{ room_name }}. The
-            room is {{ current_temp }} degrees against a target of
-            {{ target }}. The AC may be stuck on and needs a manual check.
+  # The belief flag picks the branch: the forward gates can only have passed
+  # while it is off, the reverse gates only while it is on. Both branches use
+  # the same escalation inputs (second phone, critical push, gated TTS) and
+  # differ only in wording and notification_id, so the two directions never
+  # overwrite each other's persistent notification.
+  # Known narrow race, accepted: this re-reads the flag after the conditions
+  # were evaluated, so if it flips in between, the alert carries the OTHER
+  # direction's wording. Both branches match exhaustively, so it never
+  # no-ops, and each gate requires the flag to have held for 20-45 min, so
+  # the window is milliseconds wide. Left as-is because capturing the branch
+  # at trigger time instead would introduce the mirror-image skew (variables
+  # render before the `for:` gates evaluate) without removing the race.
+  - choose:
+      # FORWARD BRANCH: believed OFF / actually ON. Actions unchanged.
+      - conditions:
+          - condition: state
+            entity_id: !input cooling_active
+            state: "off"
+        sequence:
+          - action: persistent_notification.create
+            data:
+              notification_id: "hvac_drift_{{ this.entity_id }}"
+              title: "HVAC desync suspected: {{ room_name }}"
+              message: >-
+                {{ room_name }} is {{ current_temp }}°C, {{
+                (target - current_temp) | round(1) }}°C below target {{ target }}°C,
+                but cooling_active has been off for
+                {{ ((now() - states[cooling_active_id].last_changed).total_seconds()
+                / 60) | int }} minutes (trend: {{ states(temp_trend_id) }}, gradient
+                {{ state_attr(temp_trend_id, 'gradient') }}).
+                The AC is likely physically ON while HA believes it is OFF.
+                Reconcile: check the room, press the AC power if needed, and make
+                sure the cooling_active boolean matches reality.
+          - action: "{{ notify_service }}"
+            data:
+              title: "HVAC desync suspected: {{ room_name }}"
+              message: >-
+                {{ room_name }}: {{ current_temp }}°C vs target {{ target }}°C with
+                cooling believed OFF and temp not rising. AC probably stuck ON —
+                needs a manual check.
+              data: "{{ push_data }}"
+          # Optional second phone (skipped when notify_service_2 is empty).
+          - if:
+              - condition: template
+                value_template: "{{ notify_service_2 | trim != '' }}"
+            then:
+              - action: "{{ notify_service_2 | trim }}"
+                data:
+                  title: "HVAC desync suspected: {{ room_name }}"
+                  message: >-
+                    {{ room_name }}: {{ current_temp }}°C vs target {{ target }}°C
+                    with cooling believed OFF and temp not rising. AC probably stuck
+                    ON — needs a manual check.
+                  data: "{{ push_data }}"
+          # Optional TTS announcement, gated on the tts_gate boolean when set.
+          - if:
+              - condition: template
+                value_template: >-
+                  {{ tts_media_player | trim != ''
+                  and (tts_gate | trim == '' or is_state(tts_gate | trim, 'on')) }}
+            then:
+              - action: tts.cloud_say
+                data:
+                  cache: false
+                  entity_id: "{{ tts_media_player | trim }}"
+                  message: >-
+                    Attention: possible H V A C desync in the {{ room_name }}. The
+                    room is {{ current_temp }} degrees against a target of
+                    {{ target }}. The AC may be stuck on and needs a manual check.
+      # REVERSE BRANCH: believed ON / actually OFF.
+      - conditions:
+          - condition: state
+            entity_id: !input cooling_active
+            state: "on"
+        sequence:
+          - action: persistent_notification.create
+            data:
+              notification_id: "hvac_reverse_drift_{{ this.entity_id }}"
+              title: "HVAC not cooling: {{ room_name }}"
+              message: >-
+                {{ room_name }} is {{ current_temp }}°C, {{
+                (current_temp - target) | round(1) }}°C ABOVE target {{ target }}°C,
+                and has not cooled since cooling_active turned on
+                {{ ((now() - states[cooling_active_id].last_changed).total_seconds()
+                / 60) | int }} minutes ago at {{ toggle_temp }}°C
+                (trend: {{ states(temp_trend_id) }}, gradient
+                {{ state_attr(temp_trend_id, 'gradient') }}).
+                The AC is likely physically OFF while HA believes it is ON.
+                Reconcile: check the room, press the AC power if needed, and make
+                sure the cooling_active boolean matches reality.
+          - action: "{{ notify_service }}"
+            data:
+              title: "HVAC not cooling: {{ room_name }}"
+              message: >-
+                {{ room_name }}: {{ current_temp }}°C vs target {{ target }}°C with
+                cooling believed ON but the room not cooling ({{ toggle_temp }}°C at
+                the toggle). AC probably physically OFF — needs a manual check.
+              data: "{{ push_data }}"
+          # Optional second phone (skipped when notify_service_2 is empty).
+          - if:
+              - condition: template
+                value_template: "{{ notify_service_2 | trim != '' }}"
+            then:
+              - action: "{{ notify_service_2 | trim }}"
+                data:
+                  title: "HVAC not cooling: {{ room_name }}"
+                  message: >-
+                    {{ room_name }}: {{ current_temp }}°C vs target {{ target }}°C
+                    with cooling believed ON but the room not cooling
+                    ({{ toggle_temp }}°C at the toggle). AC probably physically
+                    OFF — needs a manual check.
+                  data: "{{ push_data }}"
+          # Optional TTS announcement, gated on the tts_gate boolean when set.
+          - if:
+              - condition: template
+                value_template: >-
+                  {{ tts_media_player | trim != ''
+                  and (tts_gate | trim == '' or is_state(tts_gate | trim, 'on')) }}
+            then:
+              - action: tts.cloud_say
+                data:
+                  cache: false
+                  entity_id: "{{ tts_media_player | trim }}"
+                  message: >-
+                    Attention: the {{ room_name }} air conditioner is believed on
+                    but the room is not cooling. The room is {{ current_temp }}
+                    degrees against a target of {{ target }}. The unit may be
+                    physically off and needs a manual check.
 
 mode: single
 max_exceeded: silent

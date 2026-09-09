@@ -170,13 +170,19 @@ blueprint:
         press whose rejection left belief inverted until
         reconciliation/the watchdog. 720 s is the smallest round
         window covering that entire observed distribution with
-        margin (600 s would have missed the 660.7 s event). The old
-        aliasing concern (a reconnect burst trailing a real press
-        booking twice) is retired by the first-feedback guard: once
-        a press's first feedback books, every later blip trailing
-        that press rejects as duplicate-refire. Keep this below Late
-        Feedback Lookback — blips beyond this window but inside the
-        lookback are the suspicious-late page band.
+        margin (600 s would have missed the 660.7 s event). The
+        first-feedback guard retires SAME-PRESS aliasing only (a
+        reconnect burst or stale re-fire trailing a real press
+        booking twice): once a press's first feedback books, every
+        later blip trailing that press rejects as duplicate-refire.
+        CROSS-press aliasing is not retired and is widened by this
+        change — the toggle blueprint's loop cooldown default is
+        10 min (600 s), BELOW this 720 s window, so the window no
+        longer fits under the loop cadence and a late first feedback
+        can attribute itself to a newer press instead (see the
+        known-residuals note on the rejected path). Keep this below
+        Late Feedback Lookback — blips beyond this window but inside
+        the lookback are the suspicious-late page band.
       default: 720
       selector:
         number:
@@ -365,6 +371,21 @@ actions:
       # (belief was just corrected — lower risk); an HA restart resets the
       # switch's last_changed, so a late blip within the lookback of a
       # restart can page against the startup resync press's actuation.
+      # Cross-press alias (widened by the 2026-09-09 window widening,
+      # accepted): two commanded presses less than a window apart can
+      # collapse into ONE booking. Press P1's feedback is still pending
+      # when P2 actuates the switch; P1's blip then measures its delta
+      # from P2's actuation, is inside the window with no booking since
+      # it, and books — attributed to P2. P2's own feedback afterwards
+      # rejects booked-since (duplicate-refire), so two physical toggles
+      # book once and belief inverts SILENTLY (pre-widening that blip
+      # landed in the 60-720 s band and paged suspicious-late). The
+      # toggle blueprint's loop cooldown default (600 s) is below the
+      # 720 s window, so loop-loop aliasing needs consecutive presses
+      # spaced 600-720 s apart with feedback slower than the spacing
+      # (exactly 1 delta > 600 s in the 2026-09-04..09-09 replay);
+      # unthrottled manual HA/app presses widen the exposure. The drift
+      # watchdog is the backstop (miss-tolerant, phantom-intolerant).
       - variables:
           reject_switch_missing: "{{ states[gateway_switch_id] is none }}"
           reject_delta: >-

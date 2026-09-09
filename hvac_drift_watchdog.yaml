@@ -43,7 +43,7 @@ blueprint:
     change. When wired, five gates must all pass: (1) cooling_active has been
     ON for reverse_minutes — a floor that excludes short compressor cycles,
     NOT an abnormal duration in itself (long healthy ON stretches are routine
-    here: 41 stretches >= 45 min in the 7 days to 2026-09-09, the master
+    here: 42 stretches >= 45 min in the 7 days to 2026-09-09, the master
     bedroom's running for hours), so this gate admits a window rather than
     discriminating within it; (2) the room sits at least reverse_above_target
     above target, clear of the ±0.3°C cycling band; (3) the room has NOT
@@ -56,26 +56,41 @@ blueprint:
     branch, because right after a setpoint LOWER the room legitimately sits
     above the new target with no drop yet.
     Calibration and false-alarm evidence — a per-5-minute replay of all five
-    gates over 2026-09-02..09-09 across all five rooms (41 candidate stretches
-    past gate 1) yields 15 alerting ticks in 4 episodes, all with the
-    failure-to-cool signature and none benign: nursery 09-05 14:35Z (believed
-    ON 65 min, room risen 22.6 -> 23.0 against a 22.0 target; a re-press at
-    15:14 then pulled it down 1.3°C in 30 min — a real desync nothing
+    gates over 2026-09-02..09-09 across all five rooms (42 stretches cleared
+    gate 1; 41 had complete sensor data at the mark and form the replay set)
+    yields 23 alerting ticks in 5 episodes, every one carrying
+    the failure-to-cool signature: nursery 09-05 14:35Z (believed ON 65 min,
+    room risen 22.6 -> 23.0 against a 22.0 target; a re-press at 15:14 then
+    pulled it down 0.8°C in 30 min and 1.3°C in 39 — a real desync nothing
     detected at the time, since +1.0 stayed inside the guardrail's ±1.5
     band), nursery 09-08 05:25Z (the case above; first alert 47 min into the
-    stretch, ~35 min before the guardrail), and dining room 09-08 08:40Z
-    (24.3 -> 25.1 while believed ON) and 09-09 02:00Z. Study, living room and
-    master bedroom produce zero ticks. The nursery's own recovery cycle on
-    09-08 05:45 is the instructive near-miss: its drop sat exactly at the
-    0.5 threshold so gate 3 passed, and gate 4 alone held it quiet while the
-    room fell ~1.8°C/h.
+    stretch, ~35 min before the guardrail), dining room 09-08 08:40Z
+    (24.3 -> 25.1 while believed ON) and 09-09 02:00Z, and living room
+    09-09 04:25Z (believed ON 46 min, 23.9 against a 23.0 target stable
+    since 03:01Z, 0.2°C above its toggle temperature). Study and master
+    bedroom produce zero ticks. The living room episode is the high-load
+    plateau case reverse_above_target warns about, and it cannot be
+    adjudicated from history: these units are IR-driven with no power or
+    hvac_action feedback — the absence this watchdog exists to cover — so it
+    is counted as a signature match, not a confirmed failure.
+    Two near-misses, each held quiet by one gate alone: the nursery's own
+    09-08 05:45 recovery cycle had fallen exactly 0.5°C at the mark, so
+    gate 3 passed and gate 4 stopped it (room falling 1.2°C/h at that tick);
+    and the study's 09-04 09:35Z stretch sat 0.1°C ABOVE its toggle
+    temperature for 64 min with gates 1, 3, 4 and the grace all
+    failure-side, held by gate 2 and only by 0.1°C. Every gate is
+    load-bearing on some real stretch from this one week.
     Provenance: the nursery numbers come from
     sensor.xiaomi_cn_2049615892_mp6_temperature_p_3_2, the air purifier sensor
     the watchdog actually read until the 2026-09-08 ~22:02 HKT swap to the
     crib-level probe; sensor.nursery_temperature has no history before
     2026-09-08T14:02:52Z because that template helper was created then, so
-    incident-era values must be re-derived from the purifier entity. It reads
-    ~1.2-1.5°C warm, but gates 2-4 are all differences (temp - target,
+    incident-era values must be re-derived from the purifier entity. Their
+    offset is small and not constant: the purifier runs -0.4 to +1.3°C
+    against the probe (median +0.2) across their shared history and the two
+    read within 0.1°C of each other now, so the ~1.2°C seen at the swap
+    moment was a stratified reading rather than a fixed bias. It does not
+    affect the gates either way — 2-4 are all differences (temp - target,
     temp - toggle, gradient) and the targets were rescaled with the sensor
     (22.0 -> 21.0 asleep), so the thresholds carry across the swap unchanged.
     Replay gradients are a 30-minute endpoint delta, not the trend helper's
@@ -279,6 +294,13 @@ blueprint:
         the branch on, because it is also the branch's baseline — the room's
         temperature when cooling was commanded, which a working unit must
         pull down. Unknown/unavailable suppresses the branch (fail-quiet).
+        Accuracy of this value is the loop's job, not the blueprint's: on a
+        quick OFF/ON re-press the loop was twice observed leaving the older
+        toggle value in place (e.g. study 2026-09-04, ON at 09:35 still
+        carrying the 09:22 reading). A stale COOLER baseline only makes this
+        branch harder to trip, but a stale WARMER one would mask a real
+        failure by making the room look as though it had already fallen, so
+        prefer a loop that writes it on every ON transition.
       default: ""
       selector:
         text:
@@ -289,13 +311,13 @@ blueprint:
         failing to cool, before the reverse branch alerts. This is a floor
         that excludes short compressor cycles, not a duration that is
         abnormal by itself: long healthy ON stretches are routine on this
-        house — in the 7 days to 2026-09-09 there were 41 stretches >= 45 min
+        house — in the 7 days to 2026-09-09 there were 42 stretches >= 45 min
         (nursery 14, longest 113; study 8, longest 115; master bedroom 9,
-        running for hours at an 18°C target; living room 4; dining room 6),
+        running for hours at an 18°C target; living room 5; dining room 6),
         against a median stretch well under 20 min. So do NOT read a healthy
         room clearing this gate as a problem, and do not tune it expecting to
         separate healthy from failed operation — gates 2-4 do that (of those
-        41 stretches only 4 episodes alert, all genuine failures to cool).
+        42 stretches only 5 yield alerting episodes).
         The default of 45 matches the setpoint grace so the two gates clear
         together, and sits above the trend helper's 30-min window so the
         gradient in gate 4 is fully populated by the time it is read.
@@ -318,10 +340,15 @@ blueprint:
         high-load room: a unit that is working but losing to heat gain
         (guests, west sun, a crowd-mode target change in the living room) can
         plateau above target with little drop and no visible fall, which is
-        indistinguishable from a failure on these three signals. Not observed
-        in the 7-day replay — the living room produced zero ticks — but it is
-        the most plausible false-alarm path, so wire such rooms last and
-        raise this before blaming the drop gate.
+        indistinguishable from a failure on these three signals. That is not
+        hypothetical here — the living room entered exactly that state on
+        2026-09-09 at 04:25Z (+0.9 above a target stable since 03:01Z, 0.2°C
+        above its toggle temperature, 46 min into a believed-ON stretch) and
+        would have alerted had it been wired. Because these IR-driven units
+        report no power draw or hvac_action, history cannot settle whether
+        that unit was running, so treat this as the live false-alarm risk:
+        wire high-load rooms last, and raise this margin before touching the
+        drop gate.
       default: 0.8
       selector:
         number:
@@ -334,17 +361,21 @@ blueprint:
       description: >-
         How far (°C) the room must have fallen below temp_at_toggle to count
         as actually cooling. The reverse branch alerts only while the room is
-        still at or above (temp_at_toggle - this margin). This is the gate
-        that actually separates healthy from failed operation. Measured at
-        the 45-min mark across all 41 long ON stretches in the 7 days to
-        2026-09-09, healthy stretches had fallen 0.3-6.7°C below the toggle
-        temperature (typically ~1.0-1.5°C in the nursery, 5-6°C in the master
-        bedroom pulling to 18°C), while the four failure episodes sat
-        0.1-0.2°C ABOVE it. The default of 0.5 sits inside that gap, closer
-        to the failure side so a slow-but-real pull-down is not accused; the
-        one borderline case observed (the nursery's 09-08 05:45 recovery
-        cycle, which had fallen exactly 0.5°C) passes this gate and is held
-        quiet by gate 4 instead.
+        still at or above (temp_at_toggle - this margin). It is the strongest
+        single signal, but it is not a clean separator. Measured at the
+        45-min mark across the 41 replayable long ON stretches in the week to
+        2026-09-09, non-alerting stretches ran from 0.1°C ABOVE the toggle
+        temperature to 6.7°C below it (typically ~1.0-1.5°C below in the
+        nursery, 5-6°C in the master bedroom pulling to 18°C), while the
+        failure episodes sat 0.0-0.3°C above it. The failure side is tight,
+        but the two ranges touch: the study's 09-04 09:35Z stretch sat 0.1°C
+        above its own toggle for 64 min and was held quiet by gate 2 alone,
+        0.1°C short of the above-target margin — not by this gate. So the
+        default of 0.5 is not the middle of a gap; it sits just on the
+        healthy side of the failure cluster so a slow-but-real pull-down is
+        not accused, and it leans on gates 2 and 4 to cover the overlap. The
+        nursery's 09-08 05:45 recovery cycle, which had fallen exactly
+        0.5°C, passes this gate and is held quiet by gate 4 instead.
       default: 0.5
       selector:
         number:
@@ -358,12 +389,17 @@ blueprint:
         The reverse branch stays silent while the trend gradient is falling
         faster than this (°C/hour), so a room that is visibly pulling down
         never alerts even if the other gates pass — including the case gate 3
-        lets through, a room that has only just started to fall. Pull-downs
-        on this house measure 1.8-3.6°C/hour of fall (30-min endpoint delta),
-        while the four failure episodes replayed at +0.2 to +0.6°C/hour, i.e.
-        flat or rising. The default of 0.5 separates the two. If the gradient
-        attribute is missing (trend helper unknown/unavailable, e.g. just
-        after a reload or restart, or before it accrues min_samples) the
+        lets through, a room that has only just started to fall. Measured as
+        a 30-min endpoint delta at the 45-min mark, non-alerting stretches
+        fell at 0.6-6.0°C/hour while the failure episodes ran -0.2 to
+        +0.8°C/hour, i.e. flat, drifting or rising. The default of 0.5 sits
+        between them, but the margin is thin at the slow end: the living
+        room's 09-08 07:43Z stretch fell at just 0.6°C/hour, clearing the
+        default by 0.1. Lower this only with that in mind — a room that cools
+        slowly (small unit, high load, weak airflow) is the one this gate can
+        mistake for a failure, and gate 3 is what covers it there. If the
+        gradient attribute is missing (trend helper unknown/unavailable, e.g.
+        just after a reload or restart, or before it accrues min_samples) the
         branch holds quietly.
       default: 0.5
       selector:
@@ -493,7 +529,7 @@ conditions:
               and toggle_temp_available }}
           # Belief has said "on" long enough that a working unit would have
           # made visible progress. This only excludes short cycles — healthy
-          # stretches routinely run past it here (41 were >= 45 min in the 7
+          # stretches routinely run past it here (42 were >= 45 min in the 7
           # days to 2026-09-09), so the gates below do the discriminating...
           - condition: state
             entity_id: !input cooling_active
@@ -505,21 +541,22 @@ conditions:
           - condition: template
             value_template: "{{ current_temp >= (target + reverse_above_target) }}"
           # ...AND it has not fallen from where it stood when cooling was
-          # commanded, so nothing is being removed from the room. This is the
-          # gate that actually separates failure from health: at the 45-min
-          # mark the four replayed failure episodes sat 0.1-0.2°C ABOVE the
-          # toggle temperature, while healthy stretches had fallen 0.3-6.7°C
-          # below it.
+          # commanded, so nothing is being removed from the room. The
+          # strongest single signal, though not a clean separator: at the
+          # 45-min mark the replayed failure episodes sat 0.0-0.3°C ABOVE the
+          # toggle temperature while non-alerting stretches ran from 0.1°C
+          # above it to 6.7°C below, so the ranges touch (study 09-04 09:35Z
+          # sat 0.1 above and was held by the gate ABOVE this one, by 0.1°C).
           - condition: template
             value_template: "{{ current_temp >= (toggle_temp - reverse_min_drop) }}"
           # ...AND the room is not visibly pulling down right now — a second,
           # independent read on the same question via the trend gradient
-          # (pull-downs measure 1.8-3.6°C/h of fall, the failure episodes
-          # +0.2 to +0.6°C/h). This is what holds the borderline case quiet:
-          # the nursery's 09-08 05:45 recovery cycle passed the gate above
-          # with a drop of exactly 0.5°C and was stopped here. A missing
-          # gradient (trend helper unknown/unavailable after a reload or
-          # restart) holds the branch quiet.
+          # (non-alerting stretches fell at 0.6-6.0°C/h, the failure episodes
+          # ran -0.2 to +0.8°C/h). This is what holds the borderline case
+          # quiet: the nursery's 09-08 05:45 recovery cycle passed the gate
+          # above with a drop of exactly 0.5°C and was stopped here. A
+          # missing gradient (trend helper unknown/unavailable after a reload
+          # or restart) holds the branch quiet.
           - condition: template
             value_template: >-
               {{ state_attr(temp_trend_id, 'gradient') is not none

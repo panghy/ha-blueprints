@@ -16,6 +16,12 @@ blueprint:
     unbounded latency a timeout cannot distinguish a lost press from a late
     one), so the cooldown — which must exceed typical blip latency — is the
     only re-press throttle, and the outer loop provides lost-press recovery.
+    An optional temperature-verified OFF re-press gate (Temperature at OFF
+    Command helper + OFF Retry Rise Threshold) skips an OFF retry when the
+    room has warmed since the last OFF command in the same believed-ON
+    cycle — evidence that the earlier press physically landed but its ack
+    was lost, so re-pressing would turn the AC back ON and overcool the
+    room; rooms that leave the helper empty keep the always-retry behavior.
     Evaluation is reactive, not polled: triggers fire on temperature and
     target changes, on cooldown/off-cooldown timer.finished events, on
     cooling-belief flips and on the belief dwelling long enough to release
@@ -100,6 +106,33 @@ blueprint:
             entity:
               filter:
                 - domain: timer
+        temp_at_off_press:
+          name: Temperature at OFF Command (optional)
+          description: >-
+            Optional input_number helper enabling the temperature-verified
+            OFF re-press gate. When set, every OFF press snapshots the room
+            temperature into this helper at *command* time — written by
+            this automation, not the Press Listener, because the point is
+            to capture the room even when the press's ack never arrives
+            (the belief helpers stay listener-owned). A later OFF
+            evaluation in the same believed-ON cycle is skipped when the
+            room has risen by at least OFF Retry Rise Threshold since that
+            snapshot: a warming room with the belief still 'on' means the
+            earlier OFF press physically landed but its ack was lost, and
+            a retry would turn the AC back ON (overcool inversion) — the
+            reconciliation-rise branch then corrects the belief instead.
+            The snapshot only gates while it is newer than the belief's
+            last flip, so a value left over from a previous cycle never
+            blocks the first OFF press of a new cycle. When left empty,
+            OFF retries behave exactly as before. Create the helper with
+            max 99 and initial value 99: a restart or fresh install then
+            reads as "no snapshot" and the gate stays open (fail-safe to
+            the always-retry behavior).
+          default: ""
+          selector:
+            entity:
+              filter:
+                - domain: input_number
         hvac_mode_select:
           name: HVAC Mode Selector
           description: An input_select that indicates the current house HVAC mode (must include "Cooling").
@@ -210,6 +243,25 @@ blueprint:
               max: 15
               step: 1
               unit_of_measurement: minutes
+        off_retry_rise:
+          name: OFF Retry Rise Threshold
+          description: >-
+            Only used when a Temperature at OFF Command helper is
+            configured: skip an OFF re-press when the room temperature has
+            risen by at least this much since the last OFF command in the
+            current believed-ON cycle. 0.2 °C is two steps of a
+            0.1 °C-resolution sensor — small enough to catch a
+            genuinely-off AC within a couple of sensor reports, large
+            enough that a single flat-load step never blocks a real retry.
+            A room still at or below its last OFF-command temperature
+            always retries.
+          default: 0.2
+          selector:
+            number:
+              min: 0.1
+              max: 2.0
+              step: 0.1
+              unit_of_measurement: "°C"
         reconciliation_minutes:
           name: Reconciliation Wait
           description: >-
@@ -278,6 +330,8 @@ variables:
   reconciliation_minutes: !input reconciliation_minutes
   reconciliation_drop: !input reconciliation_drop
   reconciliation_rise: !input reconciliation_rise
+  temp_at_off_press_id: !input temp_at_off_press
+  off_retry_rise: !input off_retry_rise
   current_temp: "{{ states(temp_sensor_id) | float(15) }}"
   target: "{{ states(target_temp_id) | float(22) }}"
   toggle_temp: "{{ states(temp_at_toggle_id) | float(15) }}"
@@ -508,6 +562,26 @@ actions:
       - condition: state
         entity_id: !input cooling_active
         state: "on"
+      # Temperature-verified OFF re-press gate (opt-in rooms only): allow
+      # the press unless a previous OFF command in this same believed-ON
+      # cycle snapshotted the room and the room has since risen by at
+      # least off_retry_rise — a warming room with the belief still 'on'
+      # means that press physically landed but its ack was lost, and a
+      # retry would turn the AC back ON (overcool inversion); skipping
+      # leaves belief recovery to the reconciliation-rise branch. The
+      # snapshot gates only while newer than the belief's last flip (an
+      # older one belongs to a previous cycle); an empty input, a missing
+      # or unavailable helper, or a sentinel/non-numeric value all fall
+      # open to the original always-retry behavior.
+      - condition: template
+        value_template: >-
+          {{ temp_at_off_press_id == ''
+          or states[temp_at_off_press_id] is none
+          or states(temp_at_off_press_id) in ['unknown', 'unavailable']
+          or states[temp_at_off_press_id].last_changed
+          <= states[cooling_active_id].last_changed
+          or (current_temp - states(temp_at_off_press_id) | float(99))
+          | round(1) < off_retry_rise }}
     then:
       # Skip pressing while the slot is showing a blip or a '00' BLE drop.
       # NOTE: this does NOT detect a queued-but-undelivered press (the
@@ -554,6 +628,21 @@ actions:
             data:
               duration:
                 minutes: "{{ cooldown_minutes | int }}"
+      # Snapshot the room temperature at OFF *command* time (opt-in rooms
+      # only) for the temperature-verified gate above. Written last: if a
+      # mode-restart interruption cancels the run after the press but
+      # before this write, the gate simply falls open on the next
+      # evaluation (original always-retry behavior) instead of gating on
+      # a snapshot that was never taken.
+      - if:
+          - condition: template
+            value_template: "{{ temp_at_off_press_id != '' and temp_available }}"
+        then:
+          - action: input_number.set_value
+            target:
+              entity_id: "{{ temp_at_off_press_id }}"
+            data:
+              value: "{{ current_temp }}"
       - stop: ""
 
 mode: restart

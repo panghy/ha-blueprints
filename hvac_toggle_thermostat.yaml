@@ -572,13 +572,17 @@ actions:
       # snapshot gates only while newer than the belief's last flip (an
       # older one belongs to a previous cycle); an empty input, a missing
       # or unavailable helper, or a sentinel/non-numeric value all fall
-      # open to the original always-retry behavior.
+      # open to the original always-retry behavior. The snapshot side
+      # uses last_reported (not last_changed): set_value with a value
+      # identical to the previous cycle's snapshot does not bump
+      # last_changed, which would leave the gate silently disabled for
+      # the whole cycle.
       - condition: template
         value_template: >-
           {{ temp_at_off_press_id == ''
           or states[temp_at_off_press_id] is none
           or states(temp_at_off_press_id) in ['unknown', 'unavailable']
-          or states[temp_at_off_press_id].last_changed
+          or states[temp_at_off_press_id].last_reported
           <= states[cooling_active_id].last_changed
           or (current_temp - states(temp_at_off_press_id) | float(99))
           | round(1) < off_retry_rise }}

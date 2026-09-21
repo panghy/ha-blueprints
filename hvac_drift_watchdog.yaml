@@ -23,6 +23,36 @@ blueprint:
     while the lagging trend window can still read not-rising, so alerts are
     deferred until the target has been stable; a real stuck-on AC persists
     for hours, so the grace only delays detection, never loses it.
+
+    SETBACK AWARENESS (forward branch, optional) — wiring setback_flag and
+    setback_snapshot makes gates (1) and (4) read the room's COMFORT
+    setpoint rather than the live target, so an occupancy-driven idle
+    setback becomes invisible to the watchdog instead of blinding it. Two
+    things go wrong without it. The grace starves: each engage/restore pair
+    rewrites the target, re-arming a 45-minute grace that a busy room can
+    renew indefinitely — measured over the 7 days to 2026-09-21 the grace
+    gate was closed 41% of the time in the study (121 of 131 target changes
+    were setback writes), 17% in the dining room (96%), 12% in the living
+    room (49%). And while a setback is active the drift comparison runs
+    against an inflated target (e.g. 24.5 rather than 22.0), which makes a
+    merely-cool room look 3°C adrift. Anchoring both on the snapshot fixes
+    the pair: the snapshot only changes when the comfort setpoint itself
+    changes, and gate (1) against the comfort value is strictly HARDER to
+    pass than against an inflated target, so the change can never invent an
+    alert that the live-target form would not also have raised.
+    Back-tested per-5-minute over the same 7 days across all five rooms
+    (renotify-throttled): 5 alerts before, 6 after — no alert lost, no new
+    false positive, and the one addition is the 2026-09-21 living room
+    lost-OFF-press incident, caught at 11:31 HKT where the live-target form
+    stayed silent through the whole episode (the 11:20 idle engage and
+    11:30 restore each re-armed the grace past the room's recovery).
+    Note the limit this does NOT lift: that incident spent its first 85
+    minutes invisible to gate (1) regardless, the stuck unit holding the
+    room at 21.5-21.8 against a 22.0 target — under 1.0°C adrift — because
+    an AC in thermal equilibrium with the room's heat load reads as healthy.
+    The gates only see it once the load changes. Both inputs must be wired
+    for any of this to engage; either left empty keeps the live-target
+    behavior exactly as before, so existing instances are unaffected.
     Fires a persistent notification plus a phone notification so a human can
     reconcile the room; throttles itself via a repeat-notify window to avoid
     spamming. Optional escalation inputs: a second phone notify service, iOS
@@ -218,6 +248,50 @@ blueprint:
           max: 60
           step: 5
           unit_of_measurement: minutes
+    setback_flag:
+      name: Setback Marker Boolean (optional, with setback_snapshot)
+      description: >-
+        The input_boolean an occupancy/idle setback turns on while it owns
+        the target temperature (e.g.
+        input_boolean.living_room_idle_setback). Wired together with
+        setback_snapshot it makes the FORWARD branch setback-aware; either
+        input left empty leaves the instance reading the live target
+        exactly as before. Wire the marker for the setback that churns most
+        — here that is the idle setback, whose engage/restore pairs follow
+        occupancy. The rarer house-away setback is deliberately not covered:
+        it moves the target a handful of times a week, so it costs little
+        grace, and a second pair of inputs would buy less than the
+        complexity. Unknown/unavailable on either entity falls back to the
+        live target (fail-safe toward the previous behavior).
+      default: ""
+      selector:
+        text:
+    setback_snapshot:
+      name: Setback Comfort Snapshot (optional, with setback_flag)
+      description: >-
+        The input_number the setback writes the pre-setback comfort target
+        into when it engages (e.g.
+        input_number.living_room_target_temperature_pre_idle). It serves
+        two roles. As a VALUE it is the comfort setpoint the drift gate
+        compares against while the marker is on. As a TIMESTAMP it is the
+        grace anchor whenever it holds the comfort value — which is what
+        stops setback churn re-arming the grace, because HA preserves
+        last_changed on same-value writes, so re-snapshotting an unchanged
+        comfort target does not move it (observed: the study snapshot's
+        last_changed sat 29 hours old across 121 marker transitions). The
+        anchor follows the comfort value rather than one fixed entity: the
+        snapshot while the marker is on OR while the live target still
+        equals it (the restore writes the snapshot back verbatim, so the
+        anchor does not jump on restore), and the live target otherwise —
+        which is what keeps a genuine setpoint change, such as the 07:00
+        wake routine, arming the grace normally. One accepted corner: a
+        human setting the target by hand to exactly the stale snapshot
+        value inherits that older anchor and gets no grace. The setpoint is
+        then back at a value the room was already held to, so the raise-
+        overshoot case the grace exists for does not apply.
+      default: ""
+      selector:
+        text:
     drift_minutes:
       name: Drift Duration
       description: >-
@@ -442,6 +516,38 @@ variables:
   target: "{{ states(target_temp_id) | float(0) }}"
   temp_available: "{{ states(temp_sensor_id) not in ['unknown', 'unavailable'] }}"
   target_available: "{{ states(target_temp_id) not in ['unknown', 'unavailable'] }}"
+  # Setback awareness (forward branch only). Both inputs must be wired and
+  # readable; anything missing collapses comfort_target back to the live
+  # target and the grace anchor back to it, i.e. the pre-existing behavior.
+  # The reverse branch deliberately keeps reading the live target: swapping
+  # in a lower comfort value there would make its above-target gate EASIER
+  # to pass, the opposite of the conservative direction, and dropping the
+  # restore out of its grace would remove the cover it needs right after a
+  # target LOWER.
+  setback_flag_input: !input setback_flag
+  setback_snapshot_input: !input setback_snapshot
+  setback_flag_id: "{{ setback_flag_input | trim }}"
+  setback_snapshot_id: "{{ setback_snapshot_input | trim }}"
+  setback_wired: >-
+    {{ setback_flag_id != '' and setback_snapshot_id != ''
+    and states(setback_snapshot_id) not in ['unknown', 'unavailable']
+    and states(setback_flag_id) not in ['unknown', 'unavailable'] }}
+  setback_active: "{{ setback_wired and is_state(setback_flag_id, 'on') }}"
+  snapshot_temp: >-
+    {{ states(setback_snapshot_id) | float(target) if setback_wired else target }}
+  # What the room is really being held to: the saved comfort value while a
+  # setback owns the live target, otherwise the live target itself.
+  comfort_target: "{{ snapshot_temp if setback_active else target }}"
+  # True while the live target still carries the comfort value — the state
+  # the restore returns to, since it writes the snapshot back unchanged.
+  target_at_comfort: >-
+    {{ setback_wired and (target - snapshot_temp) | abs < 0.001 }}
+  # Whichever entity currently carries the comfort setpoint. Never empty:
+  # it falls back to target_temp_id, so the states[] subscript in the gate
+  # below is always a valid domain name.
+  grace_anchor_id: >-
+    {{ setback_snapshot_id if (setback_active or target_at_comfort)
+    else target_temp_id }}
   # Reverse branch (believed ON / actually OFF). Wiring temp_at_toggle is the
   # only switch: left empty the branch can never pass its first gate, so an
   # instance that predates it keeps its forward-only behavior untouched.
@@ -489,12 +595,15 @@ conditions:
             state: "off"
             for:
               minutes: !input drift_minutes
-          # ...yet the room is pinned well below target: impossible in summer
-          # without active cooling.
+          # ...yet the room is pinned well below the COMFORT setpoint:
+          # impossible in summer without active cooling. Against the comfort
+          # value rather than the live target, so an idle setback that has
+          # parked the target at 24.5 does not make a 21.5°C room look 3°C
+          # adrift. Unwired instances read the live target, as before.
           - condition: template
             value_template: >-
               {{ temp_available and target_available
-              and current_temp <= (target - drift_threshold) }}
+              and current_temp <= (comfort_target - drift_threshold) }}
           # ...AND the room is cold enough for a stuck-on AC to be the
           # explanation. The wall units are set to 20°C: real desyncs pin the
           # room at 18-21.5°C. A room at 23°C under a raised setpoint (e.g.
@@ -509,7 +618,7 @@ conditions:
           - condition: state
             entity_id: !input temp_trend
             state: "off"
-          # ...AND the target setpoint has been unchanged for the grace
+          # ...AND the COMFORT setpoint has been unchanged for the grace
           # period — direction-agnostic: any value change (raise OR lower,
           # e.g. an away setback) arms the grace. The motivating case was a
           # raise (07:00 wake routine: nursery 21 -> 24) leaving the room
@@ -521,10 +630,14 @@ conditions:
           # post-restart (fail-quiet, bounded). The none-guard makes this
           # self-contained rather than relying on the target_available gate
           # above.
+          # grace_anchor_id is the comfort setpoint's current home, so an
+          # idle setback's engage and restore writes no longer re-arm this —
+          # the starvation that kept the 2026-09-21 living room incident
+          # silent. Unwired instances anchor on target_temp_id, unchanged.
           - condition: template
             value_template: >-
-              {{ states[target_temp_id] is not none
-              and (now() - states[target_temp_id].last_changed).total_seconds()
+              {{ states[grace_anchor_id] is not none
+              and (now() - states[grace_anchor_id].last_changed).total_seconds()
               >= setpoint_grace_minutes | float * 60 }}
       # REVERSE BRANCH: believed ON / actually OFF. Inert on any instance
       # that has not wired temp_at_toggle.
@@ -622,7 +735,10 @@ actions:
               title: "HVAC desync suspected: {{ room_name }}"
               message: >-
                 {{ room_name }} is {{ current_temp }}°C, {{
-                (target - current_temp) | round(1) }}°C below target {{ target }}°C,
+                (comfort_target - current_temp) | round(1) }}°C below the comfort
+                setpoint {{ comfort_target }}°C{{
+                ' (live target ' ~ target ~ '°C, held by an active setback)'
+                if setback_active else '' }},
                 but cooling_active has been off for
                 {{ ((now() - states[cooling_active_id].last_changed).total_seconds()
                 / 60) | int }} minutes (trend: {{ states(temp_trend_id) }}, gradient
@@ -634,9 +750,9 @@ actions:
             data:
               title: "HVAC desync suspected: {{ room_name }}"
               message: >-
-                {{ room_name }}: {{ current_temp }}°C vs target {{ target }}°C with
-                cooling believed OFF and temp not rising. AC probably stuck ON —
-                needs a manual check.
+                {{ room_name }}: {{ current_temp }}°C vs setpoint
+                {{ comfort_target }}°C with cooling believed OFF and temp not
+                rising. AC probably stuck ON — needs a manual check.
               data: "{{ push_data }}"
           # Optional second phone (skipped when notify_service_2 is empty).
           - if:
@@ -647,9 +763,9 @@ actions:
                 data:
                   title: "HVAC desync suspected: {{ room_name }}"
                   message: >-
-                    {{ room_name }}: {{ current_temp }}°C vs target {{ target }}°C
-                    with cooling believed OFF and temp not rising. AC probably stuck
-                    ON — needs a manual check.
+                    {{ room_name }}: {{ current_temp }}°C vs setpoint
+                    {{ comfort_target }}°C with cooling believed OFF and temp not
+                    rising. AC probably stuck ON — needs a manual check.
                   data: "{{ push_data }}"
           # Optional TTS announcement, gated on the tts_gate boolean when set.
           - if:
@@ -664,8 +780,9 @@ actions:
                   entity_id: "{{ tts_media_player | trim }}"
                   message: >-
                     Attention: possible H V A C desync in the {{ room_name }}. The
-                    room is {{ current_temp }} degrees against a target of
-                    {{ target }}. The AC may be stuck on and needs a manual check.
+                    room is {{ current_temp }} degrees against a setpoint of
+                    {{ comfort_target }}. The AC may be stuck on and needs a
+                    manual check.
       # REVERSE BRANCH: believed ON / actually OFF.
       - conditions:
           - condition: state

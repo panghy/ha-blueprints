@@ -30,22 +30,23 @@ blueprint:
     setback becomes invisible to the watchdog instead of blinding it. Two
     things go wrong without it. The grace starves: each engage/restore pair
     rewrites the target, re-arming a 45-minute grace that a busy room can
-    renew indefinitely — measured over the 7 days to 2026-09-21 the grace
-    gate was closed 41% of the time in the study (121 of 131 target changes
-    were setback writes), 17% in the dining room (96%), 12% in the living
-    room (49%). And while a setback is active the drift comparison runs
-    against an inflated target (e.g. 24.5 rather than 22.0), which makes a
-    merely-cool room look 3°C adrift. Anchoring both on the snapshot fixes
-    the pair: the snapshot only changes when the comfort setpoint itself
+    renew indefinitely — measured per-5-minute over the 14 days to
+    2026-09-21 the grace gate was closed 42.0% of the time in the study,
+    17.7% in the dining room and 18.3% in the living room, falling to 4.3%,
+    2.6% and 12.7% with this wired. And while a setback is active the drift
+    comparison runs against an inflated target (e.g. 24.5 rather than
+    22.0), which makes a merely-cool room look 3°C adrift. The snapshot
+    fixes the pair: it only changes when the comfort setpoint itself
     changes, and gate (1) against the comfort value is strictly HARDER to
     pass than against an inflated target, so the change can never invent an
     alert that the live-target form would not also have raised.
-    Back-tested per-5-minute over the same 7 days across all five rooms
-    (renotify-throttled): 5 alerts before, 6 after — no alert lost, no new
-    false positive, and the one addition is the 2026-09-21 living room
-    lost-OFF-press incident, caught at 11:31 HKT where the live-target form
-    stayed silent through the whole episode (the 11:20 idle engage and
-    11:30 restore each re-armed the grace past the room's recovery).
+    Back-tested per-5-minute across all five rooms (renotify-throttled):
+    over 7 days 6 alerts before and 7 after, over 14 days 8 and 9 — no
+    alert lost, no new false positive, and the one addition is the
+    2026-09-21 living room lost-OFF-press incident, caught at 11:29 HKT
+    where the live-target form stayed silent through the whole episode (the
+    11:20 idle engage and 11:30 restore each re-armed the grace past the
+    room's recovery).
     Note the limit this does NOT lift: that incident spent its first 85
     minutes invisible to gate (1) regardless, the stuck unit holding the
     room at 21.5-21.8 against a 22.0 target — under 1.0°C adrift — because
@@ -258,11 +259,12 @@ blueprint:
         input left empty leaves the instance reading the live target
         exactly as before. Wire the marker for the setback that churns most
         — here that is the idle setback, whose engage/restore pairs follow
-        occupancy. The rarer house-away setback is deliberately not covered:
-        it moves the target a handful of times a week, so it costs little
-        grace, and a second pair of inputs would buy less than the
-        complexity. Unknown/unavailable on either entity falls back to the
-        live target (fail-safe toward the previous behavior).
+        occupancy. The house-away setback is deliberately not covered, and
+        not because it is rare: its engage clears the idle markers and
+        writes a raise (26.5), which arms the grace on its own merits, and
+        its restore is a lower. Neither half is the churn this input
+        exists to absorb. Unknown/unavailable on either entity falls back
+        to the live target (fail-safe toward the previous behavior).
       default: ""
       selector:
         text:
@@ -274,21 +276,27 @@ blueprint:
         input_number.living_room_target_temperature_pre_idle). It serves
         two roles. As a VALUE it is the comfort setpoint the drift gate
         compares against while the marker is on. As a TIMESTAMP it is the
-        grace anchor whenever it holds the comfort value — which is what
-        stops setback churn re-arming the grace, because HA preserves
+        grace anchor for the setback's own writes — which is what stops
+        setback churn re-arming the grace, because HA preserves
         last_changed on same-value writes, so re-snapshotting an unchanged
         comfort target does not move it (observed: the study snapshot's
-        last_changed sat 29 hours old across 121 marker transitions). The
-        anchor follows the comfort value rather than one fixed entity: the
-        snapshot while the marker is on OR while the live target still
-        equals it (the restore writes the snapshot back verbatim, so the
-        anchor does not jump on restore), and the live target otherwise —
-        which is what keeps a genuine setpoint change, such as the 07:00
-        wake routine, arming the grace normally. One accepted corner: a
-        human setting the target by hand to exactly the stale snapshot
-        value inherits that older anchor and gets no grace. The setpoint is
-        then back at a value the room was already held to, so the raise-
-        overshoot case the grace exists for does not apply.
+        last_changed sat 29 hours old across 121 marker transitions).
+        The anchor swaps to this entity only for a target write the
+        SETBACK made — identified by the write landing within 30 seconds
+        of a marker transition — and stays on the live target for every
+        other write, so a genuine setpoint change (the 07:00 wake routine,
+        a workout-mode restore, a hand-set target) arms the grace
+        normally. Matching on the value instead would be wrong: other
+        setbacks restore to exactly this comfort value, and over 14 days
+        30 such writes (26 living room, 4 the study workout-end raise
+        18.0->23.5) would have inherited a stale anchor and lost their
+        grace right after a raise — the case the grace exists for. The
+        30-second window is empirical: every one of 301 observed setback
+        writes landed within 4.1 s of its marker transition, while the
+        nearest non-setback write was 342 s away. Too tight merely costs
+        one cycle of grace (the previous behavior); too loose could drop
+        the grace from a real setpoint change, so it sits near the low end
+        of that gap.
       default: ""
       selector:
         text:
@@ -528,9 +536,13 @@ variables:
   setback_snapshot_input: !input setback_snapshot
   setback_flag_id: "{{ setback_flag_input | trim }}"
   setback_snapshot_id: "{{ setback_snapshot_input | trim }}"
+  # is_number keeps a boolean/text entity mis-wired into setback_snapshot
+  # from becoming the grace anchor: without it the misconfiguration reads
+  # as wired and anchors on an entity that carries no setpoint at all.
   setback_wired: >-
     {{ setback_flag_id != '' and setback_snapshot_id != ''
     and states(setback_snapshot_id) not in ['unknown', 'unavailable']
+    and is_number(states(setback_snapshot_id))
     and states(setback_flag_id) not in ['unknown', 'unavailable'] }}
   setback_active: "{{ setback_wired and is_state(setback_flag_id, 'on') }}"
   snapshot_temp: >-
@@ -538,16 +550,25 @@ variables:
   # What the room is really being held to: the saved comfort value while a
   # setback owns the live target, otherwise the live target itself.
   comfort_target: "{{ snapshot_temp if setback_active else target }}"
-  # True while the live target still carries the comfort value — the state
-  # the restore returns to, since it writes the snapshot back unchanged.
-  target_at_comfort: >-
-    {{ setback_wired and (target - snapshot_temp) | abs < 0.001 }}
-  # Whichever entity currently carries the comfort setpoint. Never empty:
-  # it falls back to target_temp_id, so the states[] subscript in the gate
-  # below is always a valid domain name.
+  # True when the live target's most recent write came FROM the setback —
+  # recognised by coincidence in time with the marker's own transition, not
+  # by value. Both the engage and the restore write the target in the same
+  # step that flips the marker (301 observed writes, worst case 4.1s apart;
+  # the nearest non-setback write was 342s away, so 30s separates them with
+  # room on both sides). Matching on value instead would swallow every
+  # other writer that lands on the comfort value — the workout-mode restore
+  # raising 18.0 to 23.5, say — and strip the grace from a real raise.
+  anchor_coincident: >-
+    {{ setback_wired
+    and states[target_temp_id] is not none
+    and states[setback_flag_id] is not none
+    and ((states[target_temp_id].last_changed
+    - states[setback_flag_id].last_changed).total_seconds() | abs) < 30 }}
+  # Where the grace anchor lives. Never empty: it falls back to
+  # target_temp_id, so the states[] subscript in the gate below is always a
+  # valid domain name.
   grace_anchor_id: >-
-    {{ setback_snapshot_id if (setback_active or target_at_comfort)
-    else target_temp_id }}
+    {{ setback_snapshot_id if anchor_coincident else target_temp_id }}
   # Reverse branch (believed ON / actually OFF). Wiring temp_at_toggle is the
   # only switch: left empty the branch can never pass its first gate, so an
   # instance that predates it keeps its forward-only behavior untouched.
@@ -630,10 +651,11 @@ conditions:
           # post-restart (fail-quiet, bounded). The none-guard makes this
           # self-contained rather than relying on the target_available gate
           # above.
-          # grace_anchor_id is the comfort setpoint's current home, so an
-          # idle setback's engage and restore writes no longer re-arm this —
+          # grace_anchor_id moves to the snapshot for the setback's own
+          # writes only, so an idle engage/restore no longer re-arms this —
           # the starvation that kept the 2026-09-21 living room incident
-          # silent. Unwired instances anchor on target_temp_id, unchanged.
+          # silent — while every other writer still arms it normally.
+          # Unwired instances anchor on target_temp_id, unchanged.
           - condition: template
             value_template: >-
               {{ states[grace_anchor_id] is not none

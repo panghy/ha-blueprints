@@ -263,7 +263,11 @@ blueprint:
         not because it is rare: its engage clears the idle markers and
         writes a raise (26.5), which arms the grace on its own merits, and
         its restore is a lower. Neither half is the churn this input
-        exists to absorb. Unknown/unavailable on either entity falls back
+        exists to absorb. That away engage does land in the same
+        millisecond as the idle marker it clears, so it is only the value
+        half of the anchor rule below — 26.5 is not the comfort snapshot —
+        that keeps the raise on the live target and leaves it its grace.
+        Unknown/unavailable on either entity falls back
         to the live target (fail-safe toward the previous behavior).
       default: ""
       selector:
@@ -282,21 +286,25 @@ blueprint:
         comfort target does not move it (observed: the study snapshot's
         last_changed sat 29 hours old across 121 marker transitions).
         The anchor swaps to this entity only for a target write the
-        SETBACK made — identified by the write landing within 30 seconds
-        of a marker transition — and stays on the live target for every
-        other write, so a genuine setpoint change (the 07:00 wake routine,
-        a workout-mode restore, a hand-set target) arms the grace
-        normally. Matching on the value instead would be wrong: other
-        setbacks restore to exactly this comfort value, and over 14 days
-        30 such writes (26 living room, 4 the study workout-end raise
-        18.0->23.5) would have inherited a stale anchor and lost their
-        grace right after a raise — the case the grace exists for. The
-        30-second window is empirical: every one of 301 observed setback
-        writes landed within 4.1 s of its marker transition, while the
-        nearest non-setback write was 342 s away. Too tight merely costs
-        one cycle of grace (the previous behavior); too loose could drop
-        the grace from a real setpoint change, so it sits near the low end
-        of that gap.
+        SETBACK made, and stays on the live target for every other write,
+        so a genuine setpoint change (the 07:00 wake routine, a
+        workout-mode restore, a hand-set target) arms the grace normally.
+        Identifying a setback write takes BOTH tests, because each alone
+        misfires. Time alone is not enough: the window has to be wide
+        enough to be robust, and the nearest independent write to a marker
+        in 14 days sat 4.08 s from one (the nap-location handler raising
+        the living room 22.0->22.5 on 09-13), so any usable window
+        contains it. Value alone is not enough either: other setbacks
+        restore to exactly this comfort value, and 30 such writes over 14
+        days (26 living room, 4 the study workout-end raise 18.0->23.5)
+        would have inherited a stale anchor and lost their grace right
+        after a raise — the case the grace exists for. Requiring both
+        separates them cleanly: all 301 observed setback writes landed
+        within 0.098 s of their marker transition and every one of the 151
+        restores landed exactly on the snapshot value, while the 09-13
+        raise is coincident but 0.5 away from the snapshot and keeps the
+        live anchor. A coincident independent write that does land on the
+        snapshot value is a same-value no-op, so it has no grace to lose.
       default: ""
       selector:
         text:
@@ -550,20 +558,28 @@ variables:
   # What the room is really being held to: the saved comfort value while a
   # setback owns the live target, otherwise the live target itself.
   comfort_target: "{{ snapshot_temp if setback_active else target }}"
-  # True when the live target's most recent write came FROM the setback —
-  # recognised by coincidence in time with the marker's own transition, not
-  # by value. Both the engage and the restore write the target in the same
-  # step that flips the marker (301 observed writes, worst case 4.1s apart;
-  # the nearest non-setback write was 342s away, so 30s separates them with
-  # room on both sides). Matching on value instead would swallow every
-  # other writer that lands on the comfort value — the workout-mode restore
-  # raising 18.0 to 23.5, say — and strip the grace from a real raise.
+  # True when the live target's most recent write came FROM the setback.
+  # Two tests, both required, because each alone misclassifies a real write.
+  # Coincidence in time with the marker's own transition: the engage and the
+  # restore both write the target in the same step that flips the marker, all
+  # 301 observed within 0.098s of it, so 30s is generous — but an independent
+  # writer can land inside any usable window and one did, the nap-location
+  # handler raising the living room 22.0 to 22.5 4.08s after an idle restore
+  # (09-13 14:53:40), the nearest independent write to a marker in 14 days.
+  # And the write has to look like the setback's: the engage while the marker
+  # is on, the restore landing on the snapshot value (151 of 151 did). Value
+  # alone would swallow every other writer that restores to the comfort value
+  # — the workout-mode raise 18.0 to 23.5, say — and strip the grace from a
+  # real raise. A coincident independent write that lands on the snapshot
+  # value is a same-value no-op, so nothing is exposed by the AND.
   anchor_coincident: >-
     {{ setback_wired
     and states[target_temp_id] is not none
     and states[setback_flag_id] is not none
     and ((states[target_temp_id].last_changed
-    - states[setback_flag_id].last_changed).total_seconds() | abs) < 30 }}
+    - states[setback_flag_id].last_changed).total_seconds() | abs) < 30
+    and (setback_active
+    or ((target - snapshot_temp) | abs) < 0.001) }}
   # Where the grace anchor lives. Never empty: it falls back to
   # target_temp_id, so the states[] subscript in the gate below is always a
   # valid domain name.

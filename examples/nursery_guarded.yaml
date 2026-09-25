@@ -85,11 +85,12 @@ script:
       physically_verified:
         required: true
         selector:
-          boolean: {}
+          # Null survives HA's package merge; an empty mapping is discarded.
+          boolean: null
       cooling:
         required: true
         selector:
-          boolean: {}
+          boolean: null
     sequence:
       - condition: template
         value_template: "{{ physically_verified | default(false) == true and cooling is boolean }}"

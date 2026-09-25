@@ -1,0 +1,8 @@
+# Python 3.14; isolated tests do not connect to Home Assistant or real hardware.
+# python -m pip install -r requirements-test.txt
+# python -m pytest -q
+homeassistant==2026.9.3
+pytest==9.1.1
+pytest-asyncio==1.4.0
+time-machine==3.1.0
+jsonpatch==1.33

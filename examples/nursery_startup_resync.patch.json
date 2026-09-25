@@ -1,0 +1,5 @@
+[
+  {"op": "test", "path": "/id", "value": "1788478600000"},
+  {"op": "test", "path": "/variables/rooms/1/key", "value": "nursery"},
+  {"op": "remove", "path": "/variables/rooms/1"}
+]

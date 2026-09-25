@@ -1,0 +1,114 @@
+# INACTIVE PREPARATION ONLY. This package does not resume control.
+# Import hvac_guarded_thermostat.yaml under blueprints/automation/panghy/ first.
+# Before supervised commissioning:
+# 1. Keep automation.nursery_hvac_automation OFF (stop_actions: true).
+# 2. Disable automation.nursery_hvac_press_listener; it must not co-write belief.
+# 3. Export HVAC Startup Belief Resync, id 1788478600000. Apply the adjacent
+#    RFC 6902 nursery_startup_resync.patch.json ONLY if its test operations pass.
+#    This removes only the nursery from variables.rooms; other rooms are intact.
+#    Stop any in-flight resync run before reloading it. Do not merely pause the
+#    nursery thermostat: that does not stop the shared startup resync actuator.
+# 4. Keep Phase B input_boolean.nursery_lost_press_recovery OFF permanently.
+#    Keep all temperature/drift alert automations and notification gates intact.
+# 5. Inventory any other writer to the nursery switch/belief helpers. Direct app,
+#    physical remote and third-party automations bypass the command journal.
+# 6. Clear any hardware-side queued command uncertainty and physically verify AC
+#    state. Run the preparation script below with physically_verified=true and
+#    cooling=true/false. It calls the existing two-helper correction script and
+#    leaves every controller disabled. Inspect its trace and journal readback.
+# 7. Only after separate authorization: enable the new controller under physical
+#    observation for an ON/OFF cycle. Observe the AC and correlate both feedback
+#    packets. Uncorrelated radio feedback cannot prove physical actuation.
+# Rollback: turn off the new controller with stop_actions:true, leave old control
+# paused, verify physical state and reconcile BOTH helpers; never auto-enable the
+# old retry controller as rollback. No gateway Connect pulse is part of this fix.
+# Restart intentionally requires another physical check: initial state is locked.
+input_text:
+  nursery_hvac_command:
+    name: Nursery HVAC Command
+    max: 255
+    initial: '{"v":1,"phase":"needs_verification","reason":"startup"}'
+
+automation:
+  - id: nursery_guarded_thermostat
+    alias: Nursery Guarded Thermostat
+    initial_state: false
+    use_blueprint:
+      path: panghy/hvac_guarded_thermostat.yaml
+      input:
+        temp_sensor: sensor.nursery_temperature
+        raw_temp_sensor: sensor.miaomiaoc_cn_blt_3_1n589451s4o00_t9_temperature_p_3_1001
+        target_temp: input_number.nursery_target_temperature
+        cooling_active: input_boolean.nursery_hvac_cooling_active
+        temp_at_toggle: input_number.nursery_hvac_temp_at_toggle
+        temp_at_off_press: input_number.nursery_hvac_temp_at_off_press
+        command_record: input_text.nursery_hvac_command
+        cooldown_timer: timer.nursery_hvac_cooldown
+        off_cooldown_timer: timer.nursery_hvac_off_cooldown
+        hvac_mode_select: input_select.house_hvac_mode
+        gateway_switch: switch.adp_cn_976148245_adgw_switch_b_p_2_6
+        gateway_status: sensor.adp_cn_976148245_adgw_status_b_p_2_7
+        upper_offset: 0.7
+        lower_offset: -0.5
+        # Same standard recipient as the prior suspicious-late listener notice.
+        # No critical push, TTS, or new recipient is introduced here.
+        alert_notify_service: notify.mobile_app_clements_iphone
+
+script:
+  nursery_prepare_verified_belief:
+    alias: Nursery prepare physically verified belief (does not enable control)
+    mode: single
+    fields:
+      physically_verified:
+        required: true
+        selector:
+          boolean: {}
+      cooling:
+        required: true
+        selector:
+          boolean: {}
+    sequence:
+      - condition: template
+        value_template: "{{ physically_verified | default(false) == true and cooling is boolean }}"
+      - condition: state
+        entity_id: automation.nursery_guarded_thermostat
+        state: 'off'
+      - condition: state
+        entity_id: automation.nursery_hvac_automation
+        state: 'off'
+      - condition: state
+        entity_id: automation.nursery_hvac_press_listener
+        state: 'off'
+      - condition: state
+        entity_id: input_boolean.nursery_lost_press_recovery
+        state: 'off'
+      - condition: template
+        value_template: >-
+          {{ is_number(states('sensor.nursery_temperature'))
+             and is_state('sensor.adp_cn_976148245_adgw_status_b_p_2_7', '01')
+             and states('switch.adp_cn_976148245_adgw_switch_b_p_2_6') in ['on', 'off'] }}
+      - variables:
+          check_started: "{{ as_timestamp(now()) }}"
+      # Invalidate any old record before touching either helper.
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.nursery_hvac_command
+        data:
+          value: '{"v":1,"phase":"needs_verification","reason":"physical_check"}'
+      - action: script.hvac_set_belief
+        data:
+          room: nursery
+          cooling: "{{ cooling }}"
+      - condition: template
+        value_template: >-
+          {{ states('input_boolean.nursery_hvac_cooling_active') == ('on' if cooling else 'off')
+             and is_number(states('input_number.nursery_hvac_temp_at_toggle'))
+             and as_timestamp(states.input_boolean.nursery_hvac_cooling_active.last_reported) >= check_started
+             and as_timestamp(states.input_number.nursery_hvac_temp_at_toggle.last_reported) >= check_started }}
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.nursery_hvac_command
+        data:
+          value: >-
+            {{ {'v': 1, 'phase': 'ready', 'expected': 'on' if cooling else 'off',
+                'issued': 0, 'booked': as_timestamp(now()), 'reason': 'physical_check'} | to_json }}

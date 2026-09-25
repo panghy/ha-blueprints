@@ -15,7 +15,9 @@
 # 6. Clear any hardware-side queued command uncertainty and physically verify AC
 #    state. Run the preparation script below with physically_verified=true and
 #    cooling=true/false. It calls the existing two-helper correction script and
-#    leaves every controller disabled. Inspect its trace and journal readback.
+#    leaves every controller disabled. Inspect its trace and verified journal.
+#    Verification binds to this disabled instance for exactly one activation;
+#    a reload or later disable/re-enable requires another physical check.
 # 7. Only after separate authorization: enable the new controller under physical
 #    observation for an ON/OFF cycle. Observe the AC and correlate both feedback
 #    packets. Uncorrelated radio feedback cannot prove physical actuation.
@@ -36,6 +38,7 @@ automation:
     use_blueprint:
       path: panghy/hvac_guarded_thermostat.yaml
       input:
+        controller_entity: automation.nursery_guarded_thermostat
         temp_sensor: sensor.nursery_temperature
         raw_temp_sensor: sensor.miaomiaoc_cn_blt_3_1n589451s4o00_t9_temperature_p_3_1001
         target_temp: input_number.nursery_target_temperature
@@ -73,6 +76,8 @@ script:
       - condition: state
         entity_id: automation.nursery_guarded_thermostat
         state: 'off'
+      - condition: template
+        value_template: "{{ state_attr('automation.nursery_guarded_thermostat', 'current') == 0 }}"
       - condition: state
         entity_id: automation.nursery_hvac_automation
         state: 'off'
@@ -89,6 +94,7 @@ script:
              and states('switch.adp_cn_976148245_adgw_switch_b_p_2_6') in ['on', 'off'] }}
       - variables:
           check_started: "{{ as_timestamp(now()) }}"
+          controller_origin: "{{ states.automation.nursery_guarded_thermostat.context.id }}"
       # Invalidate any old record before touching either helper.
       - action: input_text.set_value
         target:
@@ -102,6 +108,9 @@ script:
       - condition: template
         value_template: >-
           {{ states('input_boolean.nursery_hvac_cooling_active') == ('on' if cooling else 'off')
+             and is_state('automation.nursery_guarded_thermostat', 'off')
+             and state_attr('automation.nursery_guarded_thermostat', 'current') == 0
+             and states.automation.nursery_guarded_thermostat.context.id == controller_origin
              and is_number(states('input_number.nursery_hvac_temp_at_toggle'))
              and as_timestamp(states.input_boolean.nursery_hvac_cooling_active.last_reported) >= check_started
              and as_timestamp(states.input_number.nursery_hvac_temp_at_toggle.last_reported) >= check_started }}
@@ -110,5 +119,6 @@ script:
           entity_id: input_text.nursery_hvac_command
         data:
           value: >-
-            {{ {'v': 1, 'phase': 'ready', 'expected': 'on' if cooling else 'off',
-                'issued': 0, 'booked': as_timestamp(now()), 'reason': 'physical_check'} | to_json }}
+            {{ {'v': 1, 'phase': 'verified', 'expected': 'on' if cooling else 'off',
+                'issued': 0, 'booked': as_timestamp(now()), 'reason': 'physical_check',
+                'origin': controller_origin} | to_json }}

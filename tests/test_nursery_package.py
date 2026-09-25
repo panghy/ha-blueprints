@@ -1,6 +1,7 @@
 """The prepared package stays inactive and honors the existing two-helper rule."""
 import copy
 import json
+from pathlib import Path
 
 import jsonpatch
 import pytest
@@ -80,8 +81,40 @@ async def test_physical_check_script_never_enables_control(rig, verified):
     corrections = await prepare(rig)
     await rig.call("script", "nursery_prepare_verified_belief", {"physically_verified": verified, "cooling": False})
     assert corrections == ([{"room": "nursery", "cooling": False}] if verified else [])
-    assert rig.record["phase"] == ("ready" if verified else "needs_verification")
+    assert rig.record["phase"] == ("verified" if verified else "needs_verification")
     assert rig.hass.states.get("automation.test_0").state == "off"
+    assert not rig.presses
+
+
+@pytest.mark.asyncio
+async def test_prepared_verification_allows_exactly_one_activation(rig):
+    await prepare(rig)
+    await rig.call("script", "nursery_prepare_verified_belief", {"physically_verified": True, "cooling": False})
+    await rig.call("automation", "turn_on", {"entity_id": "automation.test_0"})
+    assert rig.record["phase"] == "ready"
+    assert not rig.presses  # Enabling itself cannot send a command.
+    await rig.advance(800)
+    await rig.tick()
+    assert len(rig.presses) == 1  # Normal verified operation still works.
+    await rig.call("automation", "turn_off", {"entity_id": "automation.test_0", "stop_actions": True})
+    await rig.call("automation", "turn_on", {"entity_id": "automation.test_0"})
+    assert rig.record["phase"] == "needs_verification"
+    assert len(rig.presses) == 1
+
+
+@pytest.mark.asyncio
+async def test_reload_while_disabled_invalidates_unused_verification(rig):
+    await prepare(rig)
+    await rig.call("script", "nursery_prepare_verified_belief", {"physically_verified": True, "cooling": False})
+    assert rig.record["phase"] == "verified"
+    config = expand("hvac_guarded_thermostat.yaml") | {
+        "id": "test_0", "alias": "Changed while disabled", "initial_state": False,
+    }
+    Path(rig.hass.config.path("configuration.yaml")).write_text(json.dumps({"automation": [config]}))
+    await rig.call("automation", "reload", {})
+    await rig.call("automation", "turn_on", {"entity_id": "automation.test_0"})
+    await rig.tick()
+    assert rig.record["phase"] == "needs_verification"
     assert not rig.presses
 
 

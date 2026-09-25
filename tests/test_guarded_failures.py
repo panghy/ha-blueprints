@@ -75,7 +75,8 @@ async def test_cancelled_send_keeps_persisted_pending_record(rig):
     await rig.advance(1000)
     await rig.call("automation", "turn_on", {"entity_id": "automation.test_0"})
     await evaluate(rig)
-    assert rig.record["reason"] == "feedback_timeout"
+    # Reactivation now invalidates immediately, before the timeout evaluation.
+    assert rig.record["reason"] == "controller_reactivated"
     assert len(rig.presses) == 1
 
 
@@ -134,7 +135,7 @@ async def test_uncommanded_switch_edge_while_ready_requires_check(rig):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("change", ["manual", "mode", "temperature", "journal"])
+@pytest.mark.parametrize("change", ["manual", "mode", "temperature", "journal", "disable"])
 async def test_changed_inputs_during_command_preparation_prevent_actuation(rig, change):
     await rig.install("hvac_guarded_thermostat.yaml")
     await rig.trust()
@@ -157,6 +158,10 @@ async def test_changed_inputs_during_command_preparation_prevent_actuation(rig, 
             rig.hass.states.async_set("input_select.mode", "Off")
         elif change == "temperature":
             rig.hass.states.async_set("sensor.temperature", "23")
+        elif change == "disable":
+            await rig.hass.services.async_call("automation", "turn_off", {
+                "entity_id": "automation.test_0", "stop_actions": False,
+            }, blocking=True)
         else:
             await rig.hass.services.async_call("input_text", "set_value", {
                 "entity_id": "input_text.command", "value": '{"v":1,"phase":"needs_verification"}',
@@ -166,6 +171,8 @@ async def test_changed_inputs_during_command_preparation_prevent_actuation(rig, 
     await rig.set("sensor.temperature", 21.3)
     assert not rig.presses
     assert rig.record["phase"] in ["pending", "needs_verification"]
+    if change == "disable":
+        await rig.call("automation", "turn_on", {"entity_id": "automation.test_0"})
     await rig.advance(1000)
     await evaluate(rig)
     assert not rig.presses

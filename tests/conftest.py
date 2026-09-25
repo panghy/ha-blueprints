@@ -16,6 +16,7 @@ from homeassistant.util import dt as dt_util, yaml as yaml_util
 
 ROOT = Path(__file__).resolve().parents[1]
 INPUTS = {
+    "controller_entity": "automation.test_0",
     "temp_sensor": "sensor.temperature",
     "raw_temp_sensor": "sensor.temperature",
     "target_temp": "input_number.target",
@@ -84,12 +85,18 @@ class Rig:
 
     async def trust(self, cooling="on"):
         # Models a physical check with both belief helpers written, then journal.
+        controller = self.hass.states.get("automation.test_0")
+        if controller is not None:
+            await self.call("automation", "turn_off", {"entity_id": "automation.test_0", "stop_actions": True})
         await self.call("input_number", "set_value", {"entity_id": "input_number.snapshot", "value": 22})
         await self.call("input_boolean", "turn_" + cooling, {"entity_id": "input_boolean.cooling"})
         await self.call("input_text", "set_value", {"entity_id": "input_text.command", "value": json.dumps({
-            "v": 1, "phase": "ready", "expected": cooling, "issued": 0,
-            "booked": self.now.timestamp(), "reason": "physical_check"
+            "v": 1, "phase": "verified", "expected": cooling, "issued": 0,
+            "booked": self.now.timestamp(), "reason": "physical_check",
+            "origin": self.hass.states.get("automation.test_0").context.id if controller is not None else "before_install",
         })})
+        if controller is not None:
+            await self.call("automation", "turn_on", {"entity_id": "automation.test_0"})
         await self.advance(801)
 
     async def install(self, *names):

@@ -13,8 +13,8 @@ blueprint:
     PRECONDITIONS: disable the old thermostat, press listener, startup resync,
     and every other automatic actuator/belief writer for this room. Supply an
     input_text with max 255 and initial '{"v":1,"phase":"needs_verification"}'.
-    A physical check must update BOTH belief helpers before writing a ready
-    journal (see examples/nursery_guarded.yaml). Keep the controller disabled
+    A physical check must update BOTH belief helpers before writing a verified
+    journal for one activation (see examples/nursery_guarded.yaml). Keep it disabled
     during that operation. Initial installation is NOT permission to resume.
 
     Feedback has no command identifier and is not proof of physical AC state.
@@ -26,6 +26,12 @@ blueprint:
   homeassistant:
     min_version: 2026.9.0
   input:
+    controller_entity:
+      name: This automation's entity ID
+      description: Must name this controller, for activation and reload invalidation.
+      selector:
+        entity:
+          domain: automation
     temp_sensor:
       name: Room temperature
       selector:
@@ -114,6 +120,7 @@ blueprint:
 # These variables are immutable entity IDs only. State is read INSIDE actions,
 # after acquiring the queue, so a queued trigger cannot reuse stale journal data.
 variables:
+  controller_id: !input controller_entity
   temp_id: !input temp_sensor
   raw_temp_id: !input raw_temp_sensor
   target_id: !input target_temp
@@ -132,6 +139,10 @@ variables:
 
 triggers:
   - trigger: state
+    entity_id: !input controller_entity
+    to: 'on'
+    id: activate
+  - trigger: state
     entity_id: !input gateway_status
     to: null
     id: feedback
@@ -142,6 +153,7 @@ triggers:
   - trigger: state
     entity_id:
       - !input temp_sensor
+      - !input raw_temp_sensor
       - !input target_temp
       - !input cooling_active
       - !input temp_at_toggle
@@ -182,10 +194,14 @@ actions:
   - variables:
       valid: >-
         {{ record is mapping and record.get('v') == 1
-           and record.get('phase') in ['ready', 'pending', 'needs_verification']
+           and record.get('phase') in ['verified', 'ready', 'pending', 'needs_verification']
            and (record.get('phase') == 'needs_verification' or
              (record.get('expected') in ['on', 'off']
               and is_number(record.get('issued')) and is_number(record.get('booked'))
+              and ((record.phase == 'verified' and record.get('origin') is string
+                    and record.origin | length > 0)
+                or (record.phase in ['ready', 'pending'] and is_number(record.get('activation'))
+                    and 0 < record.activation <= clock))
               and 0 <= record.issued <= clock and 0 < record.booked <= clock
               and (record.phase != 'pending' or record.issued >= record.booked))) }}
       packet: >-
@@ -206,12 +222,19 @@ actions:
         {% if kind == 'restart' %}restart_or_reload
         {% elif not valid %}invalid_journal
         {% elif phase == 'needs_verification' %}already_locked
+        {% elif controller_id != this.entity_id or not is_state(controller_id, 'on') %}controller_unavailable
+        {% elif kind == 'activate' and not
+             (phase == 'verified' and trigger.from_state is not none
+              and trigger.from_state.state == 'off' and trigger.from_state.context.id == record.origin
+              and trigger.to_state.last_changed == states[controller_id].last_changed) %}controller_reactivated
+        {% elif phase != 'verified'
+             and record.activation != as_timestamp(states[controller_id].last_changed) %}controller_reactivated
         {% elif disconnected %}gateway_unavailable
         {% elif states(belief_id) not in ['on', 'off']
              or not is_number(states(snapshot_id)) %}belief_unavailable
         {% elif as_timestamp(states[belief_id].last_reported) > record.booked
              or as_timestamp(states[snapshot_id].last_reported) > record.booked %}external_belief_write
-        {% elif states(belief_id) != (record.expected if phase == 'ready'
+        {% elif states(belief_id) != (record.expected if phase in ['verified', 'ready']
              else ('off' if record.expected == 'on' else 'on')) %}belief_mismatch
         {% elif phase == 'pending' and clock - record.issued > 900 %}feedback_timeout
         {% elif not is_number(states(temp_id)) or not is_number(states(target_id))
@@ -253,12 +276,33 @@ actions:
                     Check the physical AC state; automatic power commands are blocked.
       - stop: Physical verification required
 
+  # A check performed while disabled is a single-use activation ticket. Match
+  # the exact disabled state the operator checked; reload replaces that state.
+  # Already-ready/pending records can never survive another enable, even if the
+  # reload event happened while this initial_state:false controller was disabled.
+  - if: "{{ phase == 'verified' }}"
+    then:
+      - if: "{{ kind == 'activate' }}"
+        then:
+          - action: input_text.set_value
+            target:
+              entity_id: !input command_record
+            data:
+              value: >-
+                {{ {'v': 1, 'phase': 'ready', 'expected': record.expected,
+                    'issued': record.issued, 'booked': record.booked,
+                    'activation': as_timestamp(states[controller_id].last_changed)} | to_json }}
+      - stop: Wait for one verified activation; never actuate on enable
+
   - if: "{{ phase == 'pending' }}"
     then:
       - if: >-
           {{ packet and record.issued <= as_timestamp(trigger.to_state.last_changed)
              <= record.issued + 900 }}
         then:
+          - variables:
+              snapshot_before: "{{ states(snapshot_id) | float(none) }}"
+              snapshot_context_before: "{{ states[snapshot_id].context.id }}"
           # Write the expected state explicitly, never toggle. A journal write
           # failure after either helper write leaves pending/manual mismatch,
           # which locks on the next run instead of sending a second command.
@@ -267,16 +311,42 @@ actions:
               entity_id: !input temp_at_toggle
             data:
               value: "{{ temperature }}"
+          # A correction can run while a helper service yields. Before touching
+          # belief, require the snapshot to still belong to this run, the belief
+          # to be untouched since the previous booking, and our pending journal
+          # to be unchanged. Failure leaves pending; the next evaluation locks.
+          - condition: template
+            value_template: >-
+              {{ states(snapshot_id) | float(none) == temperature
+                 and is_state(controller_id, 'on')
+                 and as_timestamp(states[controller_id].last_changed) == record.activation
+                 and (states[snapshot_id].context.id == context.id
+                   or (snapshot_before == temperature
+                       and states[snapshot_id].context.id == snapshot_context_before))
+                 and as_timestamp(states[belief_id].last_reported) <= record.booked
+                 and (states(journal_id) | from_json({})) == record }}
+          - variables:
+              snapshot_reported: "{{ as_timestamp(states[snapshot_id].last_reported) }}"
+              snapshot_context: "{{ states[snapshot_id].context.id }}"
           - action: "{{ 'input_boolean.turn_' ~ record.expected }}"
             target:
               entity_id: !input cooling_active
+          - condition: template
+            value_template: >-
+              {{ states(belief_id) == record.expected
+                 and is_state(controller_id, 'on')
+                 and as_timestamp(states[controller_id].last_changed) == record.activation
+                 and states[belief_id].context.id == context.id
+                 and states[snapshot_id].context.id == snapshot_context
+                 and as_timestamp(states[snapshot_id].last_reported) == snapshot_reported
+                 and (states(journal_id) | from_json({})) == record }}
           - action: input_text.set_value
             target:
               entity_id: !input command_record
             data:
               value: >-
                 {{ {'v': 1, 'phase': 'ready', 'expected': record.expected,
-                    'issued': record.issued, 'booked': as_timestamp(now()),
+                    'issued': record.issued, 'booked': as_timestamp(now()), 'activation': record.activation,
                     'reason': 'feedback'} | to_json }}
       - stop: One outstanding command; never retry while pending
 
@@ -304,7 +374,7 @@ actions:
     data:
       value: >-
         {{ {'v': 1, 'phase': 'pending', 'expected': desired | trim,
-            'issued': issued_at, 'booked': record.booked} | to_json }}
+            'issued': issued_at, 'booked': record.booked, 'activation': record.activation} | to_json }}
   # Arm protection BEFORE switch.toggle. A cancelled or failed service call
   # retains the pending record; timer expiry cannot produce a duplicate.
   - action: timer.start
@@ -332,6 +402,9 @@ actions:
       {% set j = states(journal_id) | from_json({}) %}
       {{ j is mapping and j.get('phase') == 'pending'
          and j.get('issued') == issued_at and j.get('expected') == desired | trim
+         and j.get('activation') == record.activation
+         and is_state(controller_id, 'on')
+         and as_timestamp(states[controller_id].last_changed) == record.activation
          and is_state(mode_id, 'Cooling') and is_state(status_id, '01')
          and states(switch_id) in ['on', 'off']
          and is_state(cooldown_id, 'active') and is_state(off_cooldown_id, 'active')
@@ -339,6 +412,8 @@ actions:
          and as_timestamp(states[belief_id].last_reported) <= record.booked
          and as_timestamp(states[snapshot_id].last_reported) <= record.booked
          and is_number(states(temp_id)) and is_number(states(target_id))
+         and is_number(states(raw_temp_id))
+         and 0 <= as_timestamp(now()) - as_timestamp(states[raw_temp_id].last_reported, 0) <= 2100
          and ((desired | trim == 'on' and states(temp_id) | float > states(target_id) | float + upper)
            or (desired | trim == 'off' and states(temp_id) | float < states(target_id) | float - lower)) }}
   - action: switch.toggle

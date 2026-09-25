@@ -25,6 +25,25 @@
 # paused, verify physical state and reconcile BOTH helpers; never auto-enable the
 # old retry controller as rollback. No gateway Connect pulse is part of this fix.
 # Restart intentionally requires another physical check: initial state is locked.
+# Include this passive marker with the controller. It observes events outside
+# the automation domain, including unchanged-config reloads while control is
+# disabled. Every verification/command must match its generation. It never
+# writes helpers or controls the AC.
+template:
+  - triggers:
+      - trigger: event
+        event_type:
+          - homeassistant_started
+          - automation_reloaded
+    sensor:
+      - name: Nursery HVAC Lifecycle
+        unique_id: nursery_hvac_lifecycle
+        # Several reloads in one script may share a context. Include a sequence
+        # so each observed reload revokes the prior generation even in that case.
+        state: >-
+          {% set sequence = this.state.split(':')[-1] | int(0) %}
+          {{ trigger.event.context.id ~ ':' ~ (sequence + 1) }}
+
 input_text:
   nursery_hvac_command:
     name: Nursery HVAC Command
@@ -39,6 +58,7 @@ automation:
       path: panghy/hvac_guarded_thermostat.yaml
       input:
         controller_entity: automation.nursery_guarded_thermostat
+        lifecycle_marker: sensor.nursery_hvac_lifecycle
         temp_sensor: sensor.nursery_temperature
         raw_temp_sensor: sensor.miaomiaoc_cn_blt_3_1n589451s4o00_t9_temperature_p_3_1001
         target_temp: input_number.nursery_target_temperature
@@ -90,11 +110,13 @@ script:
       - condition: template
         value_template: >-
           {{ is_number(states('sensor.nursery_temperature'))
+             and states('sensor.nursery_hvac_lifecycle') not in ['', 'unknown', 'unavailable']
              and is_state('sensor.adp_cn_976148245_adgw_status_b_p_2_7', '01')
              and states('switch.adp_cn_976148245_adgw_switch_b_p_2_6') in ['on', 'off'] }}
       - variables:
           check_started: "{{ as_timestamp(now()) }}"
           controller_origin: "{{ states.automation.nursery_guarded_thermostat.context.id }}"
+          lifecycle_generation: "{{ states('sensor.nursery_hvac_lifecycle') }}"
       # Invalidate any old record before touching either helper.
       - action: input_text.set_value
         target:
@@ -111,6 +133,7 @@ script:
              and is_state('automation.nursery_guarded_thermostat', 'off')
              and state_attr('automation.nursery_guarded_thermostat', 'current') == 0
              and states.automation.nursery_guarded_thermostat.context.id == controller_origin
+             and states('sensor.nursery_hvac_lifecycle') == lifecycle_generation
              and is_number(states('input_number.nursery_hvac_temp_at_toggle'))
              and as_timestamp(states.input_boolean.nursery_hvac_cooling_active.last_reported) >= check_started
              and as_timestamp(states.input_number.nursery_hvac_temp_at_toggle.last_reported) >= check_started }}
@@ -121,4 +144,4 @@ script:
           value: >-
             {{ {'v': 1, 'phase': 'verified', 'expected': 'on' if cooling else 'off',
                 'issued': 0, 'booked': as_timestamp(now()), 'reason': 'physical_check',
-                'origin': controller_origin} | to_json }}
+                'origin': controller_origin, 'generation': lifecycle_generation} | to_json }}

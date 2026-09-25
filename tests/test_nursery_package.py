@@ -6,6 +6,7 @@ from pathlib import Path
 import jsonpatch
 import pytest
 from homeassistant.setup import async_setup_component
+from homeassistant.core import Context
 from homeassistant.util import yaml as yaml_util
 
 from conftest import ROOT, INPUTS, expand
@@ -115,6 +116,50 @@ async def test_reload_while_disabled_invalidates_unused_verification(rig):
     await rig.call("automation", "turn_on", {"entity_id": "automation.test_0"})
     await rig.tick()
     assert rig.record["phase"] == "needs_verification"
+    assert not rig.presses
+
+
+@pytest.mark.asyncio
+async def test_passive_marker_changes_for_reloads_sharing_context(rig):
+    await prepare(rig)
+    context = Context()
+    generations = {rig.hass.states.get(INPUTS["lifecycle_marker"]).state}
+    for _ in range(2):
+        rig.hass.bus.async_fire("automation_reloaded", context=context)
+        await rig.settle()
+        generations.add(rig.hass.states.get(INPUTS["lifecycle_marker"]).state)
+    assert len(generations) == 3
+    assert rig.hass.states.get("automation.test_0").state == "off"
+    assert not rig.presses
+
+
+@pytest.mark.asyncio
+async def test_fresh_check_after_reload_can_restore_trust(rig):
+    await prepare(rig)
+    await rig.call("script", "nursery_prepare_verified_belief", {"physically_verified": True, "cooling": False})
+    old_generation = rig.record["generation"]
+    rig.hass.bus.async_fire("automation_reloaded")
+    await rig.settle()
+    await rig.call("script", "nursery_prepare_verified_belief", {"physically_verified": True, "cooling": False})
+    assert rig.record["generation"] != old_generation
+    assert rig.record["phase"] == "verified"
+    assert rig.hass.states.get("automation.test_0").state == "off"
+    await rig.call("automation", "turn_on", {"entity_id": "automation.test_0"})
+    await rig.advance(800)
+    await rig.tick()
+    assert len(rig.presses) == 1
+
+
+@pytest.mark.asyncio
+async def test_missing_passive_marker_prevents_physical_check_and_power(rig):
+    corrections = await prepare(rig)
+    await rig.set(INPUTS["lifecycle_marker"], "unavailable")
+    await rig.call("script", "nursery_prepare_verified_belief", {"physically_verified": True, "cooling": False})
+    assert not corrections
+    assert rig.record["phase"] == "needs_verification"
+    await rig.call("automation", "turn_on", {"entity_id": "automation.test_0"})
+    await rig.advance(800)
+    await rig.tick()
     assert not rig.presses
 
 

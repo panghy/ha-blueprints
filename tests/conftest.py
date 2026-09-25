@@ -17,6 +17,7 @@ from homeassistant.util import dt as dt_util, yaml as yaml_util
 ROOT = Path(__file__).resolve().parents[1]
 INPUTS = {
     "controller_entity": "automation.test_0",
+    "lifecycle_marker": "sensor.nursery_hvac_lifecycle",
     "temp_sensor": "sensor.temperature",
     "raw_temp_sensor": "sensor.temperature",
     "target_temp": "input_number.target",
@@ -94,6 +95,7 @@ class Rig:
             "v": 1, "phase": "verified", "expected": cooling, "issued": 0,
             "booked": self.now.timestamp(), "reason": "physical_check",
             "origin": self.hass.states.get("automation.test_0").context.id if controller is not None else "before_install",
+            "generation": self.hass.states.get(INPUTS["lifecycle_marker"]).state,
         })})
         if controller is not None:
             await self.call("automation", "turn_on", {"entity_id": "automation.test_0"})
@@ -128,6 +130,11 @@ async def rig(tmp_path):
         }
         for domain in config:
             assert await async_setup_component(hass, domain, config)
+        # Load the actual passive observer from the package, in its separate HA
+        # domain. Automation-only reloads must not pause or replace its listener.
+        package = yaml_util.load_yaml(str(ROOT / "examples/nursery_guarded.yaml"))
+        assert await async_setup_component(hass, "template", {"template": package["template"]})
+        await rig.settle()
         await rig.set("sensor.temperature", "22")
         await rig.set("sensor.feedback", "01")
         await rig.set("switch.fingerbot", "off")

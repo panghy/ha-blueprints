@@ -13,6 +13,8 @@ blueprint:
     PRECONDITIONS: disable the old thermostat, press listener, startup resync,
     and every other automatic actuator/belief writer for this room. Supply an
     input_text with max 255 and initial '{"v":1,"phase":"needs_verification"}'.
+    Include the independent lifecycle marker from examples/nursery_guarded.yaml;
+    it observes reloads even when this automation is disabled or unchanged.
     A physical check must update BOTH belief helpers before writing a verified
     journal for one activation (see examples/nursery_guarded.yaml). Keep it disabled
     during that operation. Initial installation is NOT permission to resume.
@@ -32,6 +34,12 @@ blueprint:
       selector:
         entity:
           domain: automation
+    lifecycle_marker:
+      name: Independent restart and reload marker
+      description: Use the triggered template sensor from the example package.
+      selector:
+        entity:
+          domain: sensor
     temp_sensor:
       name: Room temperature
       selector:
@@ -121,6 +129,7 @@ blueprint:
 # after acquiring the queue, so a queued trigger cannot reuse stale journal data.
 variables:
   controller_id: !input controller_entity
+  lifecycle_id: !input lifecycle_marker
   temp_id: !input temp_sensor
   raw_temp_id: !input raw_temp_sensor
   target_id: !input target_temp
@@ -154,6 +163,7 @@ triggers:
     entity_id:
       - !input temp_sensor
       - !input raw_temp_sensor
+      - !input lifecycle_marker
       - !input target_temp
       - !input cooling_active
       - !input temp_at_toggle
@@ -198,6 +208,8 @@ actions:
            and (record.get('phase') == 'needs_verification' or
              (record.get('expected') in ['on', 'off']
               and is_number(record.get('issued')) and is_number(record.get('booked'))
+              and record.get('generation') is string
+              and record.generation not in ['', 'unknown', 'unavailable']
               and ((record.phase == 'verified' and record.get('origin') is string
                     and record.origin | length > 0)
                 or (record.phase in ['ready', 'pending'] and is_number(record.get('activation'))
@@ -222,6 +234,8 @@ actions:
         {% if kind == 'restart' %}restart_or_reload
         {% elif not valid %}invalid_journal
         {% elif phase == 'needs_verification' %}already_locked
+        {% elif states(lifecycle_id) in ['', 'unknown', 'unavailable']
+             or record.generation != states(lifecycle_id) %}restart_or_reload
         {% elif controller_id != this.entity_id or not is_state(controller_id, 'on') %}controller_unavailable
         {% elif kind == 'activate' and not
              (phase == 'verified' and trigger.from_state is not none
@@ -277,9 +291,9 @@ actions:
       - stop: Physical verification required
 
   # A check performed while disabled is a single-use activation ticket. Match
-  # the exact disabled state the operator checked; reload replaces that state.
-  # Already-ready/pending records can never survive another enable, even if the
-  # reload event happened while this initial_state:false controller was disabled.
+  # the checked instance and independent reload generation: HA can retain an
+  # unchanged disabled instance across reloads. Ready/pending records also
+  # cannot survive another enable without a new physical check.
   - if: "{{ phase == 'verified' }}"
     then:
       - if: "{{ kind == 'activate' }}"
@@ -291,7 +305,8 @@ actions:
               value: >-
                 {{ {'v': 1, 'phase': 'ready', 'expected': record.expected,
                     'issued': record.issued, 'booked': record.booked,
-                    'activation': as_timestamp(states[controller_id].last_changed)} | to_json }}
+                    'activation': as_timestamp(states[controller_id].last_changed),
+                    'generation': record.generation} | to_json }}
       - stop: Wait for one verified activation; never actuate on enable
 
   - if: "{{ phase == 'pending' }}"
@@ -303,14 +318,20 @@ actions:
           - variables:
               snapshot_before: "{{ states(snapshot_id) | float(none) }}"
               snapshot_context_before: "{{ states[snapshot_id].context.id }}"
+              snapshot_reported_before: "{{ as_timestamp(states[snapshot_id].last_reported) }}"
           # Write the expected state explicitly, never toggle. A journal write
           # failure after either helper write leaves pending/manual mismatch,
           # which locks on the next run instead of sending a second command.
-          - action: input_number.set_value
-            target:
-              entity_id: !input temp_at_toggle
-            data:
-              value: "{{ temperature }}"
+          # Avoid a no-op write: HA retains the old State/context for those.
+          # A changed write must have exactly its original report, so an extra
+          # same-value report cannot be absorbed into a new booked timestamp.
+          - if: "{{ snapshot_before != temperature }}"
+            then:
+              - action: input_number.set_value
+                target:
+                  entity_id: !input temp_at_toggle
+                data:
+                  value: "{{ temperature }}"
           # A correction can run while a helper service yields. Before touching
           # belief, require the snapshot to still belong to this run, the belief
           # to be untouched since the previous booking, and our pending journal
@@ -320,9 +341,12 @@ actions:
               {{ states(snapshot_id) | float(none) == temperature
                  and is_state(controller_id, 'on')
                  and as_timestamp(states[controller_id].last_changed) == record.activation
-                 and (states[snapshot_id].context.id == context.id
-                   or (snapshot_before == temperature
-                       and states[snapshot_id].context.id == snapshot_context_before))
+                 and states(lifecycle_id) == record.generation
+                 and ((snapshot_before != temperature
+                       and states[snapshot_id].context.id == context.id
+                       and states[snapshot_id].last_reported == states[snapshot_id].last_updated)
+                   or (snapshot_before == temperature and states[snapshot_id].context.id == snapshot_context_before
+                       and as_timestamp(states[snapshot_id].last_reported) == snapshot_reported_before))
                  and as_timestamp(states[belief_id].last_reported) <= record.booked
                  and (states(journal_id) | from_json({})) == record }}
           - variables:
@@ -336,7 +360,9 @@ actions:
               {{ states(belief_id) == record.expected
                  and is_state(controller_id, 'on')
                  and as_timestamp(states[controller_id].last_changed) == record.activation
+                 and states(lifecycle_id) == record.generation
                  and states[belief_id].context.id == context.id
+                 and states[belief_id].last_reported == states[belief_id].last_updated
                  and states[snapshot_id].context.id == snapshot_context
                  and as_timestamp(states[snapshot_id].last_reported) == snapshot_reported
                  and (states(journal_id) | from_json({})) == record }}
@@ -347,7 +373,7 @@ actions:
               value: >-
                 {{ {'v': 1, 'phase': 'ready', 'expected': record.expected,
                     'issued': record.issued, 'booked': as_timestamp(now()), 'activation': record.activation,
-                    'reason': 'feedback'} | to_json }}
+                    'generation': record.generation, 'reason': 'feedback'} | to_json }}
       - stop: One outstanding command; never retry while pending
 
   # A packet may book a belief or be ignored, but never initiate a power command.
@@ -374,7 +400,8 @@ actions:
     data:
       value: >-
         {{ {'v': 1, 'phase': 'pending', 'expected': desired | trim,
-            'issued': issued_at, 'booked': record.booked, 'activation': record.activation} | to_json }}
+            'issued': issued_at, 'booked': record.booked, 'activation': record.activation,
+            'generation': record.generation} | to_json }}
   # Arm protection BEFORE switch.toggle. A cancelled or failed service call
   # retains the pending record; timer expiry cannot produce a duplicate.
   - action: timer.start
@@ -403,6 +430,8 @@ actions:
       {{ j is mapping and j.get('phase') == 'pending'
          and j.get('issued') == issued_at and j.get('expected') == desired | trim
          and j.get('activation') == record.activation
+         and j.get('generation') == record.generation
+         and states(lifecycle_id) == record.generation
          and is_state(controller_id, 'on')
          and as_timestamp(states[controller_id].last_changed) == record.activation
          and is_state(mode_id, 'Cooling') and is_state(status_id, '01')

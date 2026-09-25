@@ -8,6 +8,7 @@ from homeassistant.setup import async_setup_component
 
 from conftest import expand, INPUTS
 from test_nursery_feedback import pending_off
+from test_nursery_package import prepare
 
 
 @pytest.mark.asyncio
@@ -154,3 +155,53 @@ async def test_disable_enable_requires_new_check_even_without_reload(rig, pendin
     assert rig.record["reason"] == "controller_reactivated"
     await rig.tick()
     assert len(rig.presses) == presses_before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("helper", ["snapshot", "belief"])
+async def test_same_value_external_write_during_feedback_invalidates_trust(rig, helper):
+    await pending_off(rig)
+    await rig.advance(30)
+    domain, service, data = (
+        ("input_number", "set_value", {"entity_id": "input_number.snapshot", "value": 21.3})
+        if helper == "snapshot" else
+        ("input_boolean", "turn_off", {"entity_id": "input_boolean.cooling"})
+    )
+    original = rig.hass.services.async_services()[domain][service]
+    corrected = False
+
+    async def repeat_with_external_context(call):
+        nonlocal corrected
+        await original.job.target(call)
+        if corrected:
+            return
+        corrected = True
+        rig.now += timedelta(seconds=1)
+        rig.clock.move_to(rig.now)
+        await rig.hass.services.async_call(domain, service, data, blocking=True)
+
+    rig.hass.services.async_register(domain, service, repeat_with_external_context, schema=original.schema)
+    await rig.set("sensor.feedback", "0500010154000300")
+    await rig.tick()
+    assert corrected
+    assert rig.record["phase"] == "needs_verification", rig.record
+
+
+@pytest.mark.asyncio
+async def test_unchanged_reload_while_disabled_invalidates_verification(rig):
+    await prepare(rig)
+    config = expand("hvac_guarded_thermostat.yaml") | {
+        "id": "test_0", "alias": "Test 0", "initial_state": False,
+    }
+    Path(rig.hass.config.path("configuration.yaml")).write_text(json.dumps({"automation": [config]}))
+    await rig.call("automation", "reload", {})
+    await rig.call("script", "nursery_prepare_verified_belief", {"physically_verified": True, "cooling": False})
+    assert rig.record["phase"] == "verified"
+    origin = rig.record["origin"]
+    await rig.call("automation", "reload", {})
+    after_reload = rig.hass.states.get("automation.test_0")
+    await rig.call("automation", "turn_on", {"entity_id": "automation.test_0"})
+    await rig.advance(800)
+    await rig.tick()
+    assert not rig.presses, {"origin": origin, "after_reload_context": after_reload.context.id, "record": rig.record}
+    assert rig.record["phase"] == "needs_verification"

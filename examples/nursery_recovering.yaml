@@ -31,4 +31,3 @@ automation:
         # Same standard recipient as the prior suspicious-late listener notice.
         # No critical push, TTS, or new recipient is introduced here.
         alert_notify_service: notify.mobile_app_clements_iphone
-

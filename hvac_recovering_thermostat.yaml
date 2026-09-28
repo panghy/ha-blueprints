@@ -1,0 +1,444 @@
+blueprint:
+  name: HVAC Recovering Toggle Thermostat
+  description: >-
+    Opt-in single-writer thermostat with automatic lost-command recovery.
+    Missing feedback never requires a physical reset: after at least 13 minutes,
+    reassess temperature and retry only while the requested change is still
+    needed. A falling room can confirm a pending ON estimate; a warming room
+    can confirm a pending OFF estimate without another power toggle. Correct
+    an idle estimate when sustained temperature drift contradicts it.
+
+    This is an explicitly selected availability tradeoff. Feedback has no
+    command identifier; late execution, lost feedback and ambient temperature
+    changes can still produce wrong estimates or double toggles. Convergence
+    and actual AC power state are not guaranteed by software observations.
+    Keep existing temperature alerts and physically inspect persistent drift.
+
+    Replace both the old thermostat and press listener with this one writer.
+    Keep other automatic power writers, startup resync and gateway reconnect
+    recovery disabled for the room. Commands and protection timers are recorded
+    before actuation. Sensor/gateway outages hold commands temporarily and
+    recover automatically; restart/reload/manual corrections do not latch a
+    physical-verification lockout. No lockout notification or Connect pulse.
+  domain: automation
+  homeassistant:
+    min_version: 2026.9.0
+  input:
+    controller_entity:
+      name: This automation's entity ID
+      description: Must name this controller for run ownership checks.
+      selector:
+        entity:
+          domain: automation
+    lifecycle_marker:
+      name: Independent restart and reload marker
+      description: Use the triggered template sensor from the example package.
+      selector:
+        entity:
+          domain: sensor
+    temp_sensor:
+      name: Room temperature
+      selector:
+        entity:
+          domain: sensor
+    raw_temp_sensor:
+      name: Raw temperature probe (freshness)
+      description: Use the source probe; retain the nursery's 35-minute freshness limit.
+      selector:
+        entity:
+          domain: sensor
+    target_temp:
+      name: Target temperature
+      selector:
+        entity:
+          domain: input_number
+    cooling_active:
+      name: Cooling belief
+      selector:
+        entity:
+          domain: input_boolean
+    temp_at_toggle:
+      name: Temperature at belief update
+      selector:
+        entity:
+          domain: input_number
+    temp_at_off_press:
+      name: Temperature at OFF command
+      selector:
+        entity:
+          domain: input_number
+    command_record:
+      name: Command journal
+      selector:
+        entity:
+          domain: input_text
+    cooldown_timer:
+      name: Shared cooldown timer
+      selector:
+        entity:
+          domain: timer
+    off_cooldown_timer:
+      name: OFF cooldown timer
+      selector:
+        entity:
+          domain: timer
+    hvac_mode_select:
+      name: House HVAC mode (Cooling)
+      selector:
+        entity:
+          domain: input_select
+    gateway_switch:
+      name: Fingerbot power switch
+      selector:
+        entity:
+          domain: switch
+    gateway_status:
+      name: Fingerbot feedback sensor
+      selector:
+        entity:
+          domain: sensor
+    upper_offset:
+      name: Start above target plus this offset
+      default: 0.7
+      selector:
+        number:
+          min: 0.1
+          max: 2
+          step: 0.1
+    lower_offset:
+      name: Stop below target minus this offset
+      description: Nursery uses -0.5, stopping below target plus 0.5 degrees.
+      default: -0.5
+      selector:
+        number:
+          min: -2
+          max: 2
+          step: 0.1
+    alert_notify_service:
+      name: Existing standard notification service
+      description: Compatibility input; this controller sends no lockout notices. Temperature/drift alerts stay separate.
+      default: ""
+      selector:
+        text: {}
+
+# These variables are immutable entity IDs only. State is read INSIDE actions,
+# after acquiring the queue, so a queued trigger cannot reuse stale journal data.
+variables:
+  controller_id: !input controller_entity
+  lifecycle_id: !input lifecycle_marker
+  temp_id: !input temp_sensor
+  raw_temp_id: !input raw_temp_sensor
+  target_id: !input target_temp
+  belief_id: !input cooling_active
+  snapshot_id: !input temp_at_toggle
+  off_snapshot_id: !input temp_at_off_press
+  journal_id: !input command_record
+  cooldown_id: !input cooldown_timer
+  off_cooldown_id: !input off_cooldown_timer
+  mode_id: !input hvac_mode_select
+  switch_id: !input gateway_switch
+  status_id: !input gateway_status
+  upper: !input upper_offset
+  lower: !input lower_offset
+  notify_service: !input alert_notify_service
+
+triggers:
+  - trigger: state
+    entity_id: !input controller_entity
+    to: 'on'
+    id: activate
+  - trigger: state
+    entity_id: !input gateway_status
+    to: null
+    id: feedback
+  - trigger: state
+    entity_id: !input gateway_switch
+    to: null
+    id: switch
+  - trigger: state
+    entity_id:
+      - !input temp_sensor
+      - !input raw_temp_sensor
+      - !input lifecycle_marker
+      - !input target_temp
+      - !input cooling_active
+      - !input temp_at_toggle
+      - !input cooldown_timer
+      - !input off_cooldown_timer
+      - !input hvac_mode_select
+    to: null
+    id: evaluate
+  - trigger: event
+    event_type: timer.finished
+    event_data:
+      entity_id: !input cooldown_timer
+    id: evaluate
+  - trigger: event
+    event_type: timer.finished
+    event_data:
+      entity_id: !input off_cooldown_timer
+    id: evaluate
+  - trigger: time_pattern
+    seconds: /30
+    id: evaluate
+  - trigger: homeassistant
+    event: start
+    id: restart
+  - trigger: event
+    event_type: automation_reloaded
+    id: restart
+
+conditions: []
+actions:
+  # Read mutable state only after entering the queue. Changes to helpers or
+  # lifecycle while a service yields abort that run, then reconcile next run.
+  - variables:
+      record: "{{ states(journal_id) | from_json({}) }}"
+      clock: "{{ as_timestamp(now()) }}"
+      temperature: "{{ states(temp_id) | float(none) }}"
+      target: "{{ states(target_id) | float(none) }}"
+      kind: "{{ trigger.id | default('evaluate') }}"
+      generation: "{{ states(lifecycle_id) }}"
+      activation: "{{ as_timestamp(states[controller_id].last_changed, 0) }}"
+  - condition: template
+    value_template: >-
+      {{ controller_id == this.entity_id and is_state(controller_id, 'on')
+         and generation not in ['', 'unknown', 'unavailable']
+         and is_number(states(temp_id)) and is_number(states(target_id))
+         and is_number(states(raw_temp_id))
+         and 0 <= clock - as_timestamp(states[raw_temp_id].last_reported, 0) <= 2100
+         and states(belief_id) in ['on', 'off'] and is_number(states(snapshot_id))
+         and states(cooldown_id) in ['idle', 'active', 'paused']
+         and states(off_cooldown_id) in ['idle', 'active', 'paused'] }}
+  # Carry a guarded controller's known command age through an in-place handoff.
+  # A pending ON has no stored command-temperature baseline in v1: start its
+  # thermal observation at the current sample; never invent a historical value.
+  - if: >-
+      {{ record is mapping and record.get('v') == 1
+         and record.get('phase') in ['verified', 'ready', 'pending']
+         and record.get('expected') in ['on', 'off']
+         and record.get('issued') is number and is_number(record.get('issued'))
+         and record.get('booked') is number and is_number(record.get('booked'))
+         and 0 <= record.issued <= clock and 0 < record.booked <= clock
+         and (record.phase != 'pending' or record.issued >= record.booked)
+         and as_timestamp(states[belief_id].last_reported) <= record.booked
+         and as_timestamp(states[snapshot_id].last_reported) <= record.booked
+         and states(belief_id) == (record.expected if record.phase != 'pending'
+              else ('off' if record.expected == 'on' else 'on')) }}
+    then:
+      - action: input_text.set_value
+        target:
+          entity_id: !input command_record
+        data:
+          value: >-
+            {{ {'v': 2, 'phase': 'pending' if record.phase == 'pending' else 'ready',
+                'expected': record.expected, 'issued': record.issued, 'booked': record.booked,
+                't': (states(off_snapshot_id) | float(temperature)
+                       if record.phase == 'pending' and record.expected == 'off'
+                       else temperature if record.phase == 'pending'
+                       else states(snapshot_id) | float),
+                'generation': generation, 'reason': 'migration'} | to_json }}
+      - stop: Previous command carried forward; no actuation during migration
+  - variables:
+      valid: >-
+        {{ record is mapping and record.get('v') == 2
+           and record.get('phase') in ['ready', 'pending']
+           and record.get('expected') in ['on', 'off']
+           and record.get('issued') is number and is_number(record.get('issued'))
+           and record.get('booked') is number and is_number(record.get('booked'))
+           and record.get('t') is number and is_number(record.get('t')) and record.get('generation') is string
+           and 0 <= record.issued <= clock and 0 < record.booked <= clock
+           and (record.phase != 'pending' or record.issued >= record.booked) }}
+      packet: >-
+        {{ kind == 'feedback' and trigger.to_state is not none
+           and trigger.from_state is not none
+           and trigger.to_state.state.startswith('0500')
+           and (trigger.from_state.state in ['01', '00']
+             or (trigger.from_state.state.startswith('0500')
+               and (trigger.to_state.last_changed - trigger.from_state.last_changed).total_seconds() > 2)) }}
+  - variables:
+      corrected: >-
+        {{ valid and (as_timestamp(states[belief_id].last_reported) > record.booked
+            or as_timestamp(states[snapshot_id].last_reported) > record.booked
+            or states(belief_id) != (record.expected if record.phase == 'ready'
+                 else ('off' if record.expected == 'on' else 'on'))) }}
+  # Invalid/restored records and external helper corrections recover by adopting
+  # the current estimate, never claiming a new physical check. Fresh booking
+  # imposes the normal protection interval. No helper is overwritten here.
+  - if: "{{ not valid or corrected }}"
+    then:
+      - action: input_text.set_value
+        target:
+          entity_id: !input command_record
+        data:
+          value: >-
+            {{ {'v': 2, 'phase': 'ready', 'expected': states(belief_id),
+                'issued': clock, 'booked': clock,
+                't': states(snapshot_id) | float, 'generation': generation,
+                'reason': 'estimate_adopted'} | to_json }}
+      - stop: Estimate adopted; normal protection interval applies
+  # Preserve an outstanding command and its original age across reloads.
+  # This marker protects yielding runs; it is not a human-reset requirement.
+  - if: "{{ record.generation != generation }}"
+    then:
+      - action: input_text.set_value
+        target:
+          entity_id: !input command_record
+        data:
+          value: "{{ dict(record, generation=generation) | to_json }}"
+      - stop: Lifecycle updated; reevaluate automatically
+  - variables:
+      booking: >-
+        {% if record.phase == 'pending' and packet
+           and record.issued <= as_timestamp(trigger.to_state.last_changed) %}
+          {{ record.expected }}
+        {% elif not packet and is_state(cooldown_id, 'idle')
+           and clock - record.issued >= 780 and clock - record.booked >= 780 %}
+          {% if record.phase == 'pending'
+             and as_timestamp(states[raw_temp_id].last_reported) > record.issued %}
+            {% if record.expected == 'on' and (record.t - temperature) | round(1) >= 0.4 %}on
+            {% elif record.expected == 'off' and (temperature - record.t) | round(1) >= 0.2 %}off
+            {% else %}{{ '' }}{% endif %}
+          {% elif record.phase == 'ready' %}
+            {% if record.expected == 'on' and (temperature - record.t) | round(1) >= 0.4 %}off
+            {% elif record.expected == 'off' and (record.t - temperature) | round(1) >= 1.0 %}on
+            {% else %}{{ '' }}{% endif %}
+          {% else %}{{ '' }}{% endif %}
+        {% else %}{{ '' }}{% endif %}
+  - if: "{{ booking | trim in ['on', 'off'] }}"
+    then:
+      - variables:
+          snapshot_before: "{{ states(snapshot_id) | float(none) }}"
+          snapshot_context_before: "{{ states[snapshot_id].context.id }}"
+          snapshot_reported_before: "{{ as_timestamp(states[snapshot_id].last_reported) }}"
+      # HA normalizes numeric state strings; tolerate representation noise only.
+      # Context and report timestamps still detect same-value external writes.
+      - if: "{{ (snapshot_before - temperature) | abs > 0.000001 }}"
+        then:
+          - action: input_number.set_value
+            target:
+              entity_id: !input temp_at_toggle
+            data:
+              value: "{{ temperature }}"
+      - condition: template
+        value_template: >-
+          {{ is_number(states(snapshot_id))
+             and (states(snapshot_id) | float - temperature) | abs <= 0.000001
+             and is_state(controller_id, 'on')
+             and as_timestamp(states[controller_id].last_changed) == activation
+             and states(lifecycle_id) == generation
+             and (((snapshot_before - temperature) | abs > 0.000001
+                   and states[snapshot_id].context.id == context.id
+                   and states[snapshot_id].last_reported == states[snapshot_id].last_updated)
+               or ((snapshot_before - temperature) | abs <= 0.000001 and states[snapshot_id].context.id == snapshot_context_before
+                   and as_timestamp(states[snapshot_id].last_reported) == snapshot_reported_before))
+             and as_timestamp(states[belief_id].last_reported) <= record.booked
+             and (states(journal_id) | from_json({})) == record }}
+      - variables:
+          snapshot_reported: "{{ as_timestamp(states[snapshot_id].last_reported) }}"
+          snapshot_context: "{{ states[snapshot_id].context.id }}"
+      - action: "{{ 'input_boolean.turn_' ~ (booking | trim) }}"
+        target:
+          entity_id: !input cooling_active
+      - condition: template
+        value_template: >-
+          {{ states(belief_id) == booking | trim
+             and is_state(controller_id, 'on')
+             and as_timestamp(states[controller_id].last_changed) == activation
+             and states(lifecycle_id) == generation
+             and states[belief_id].context.id == context.id
+             and states[belief_id].last_reported == states[belief_id].last_updated
+             and states[snapshot_id].context.id == snapshot_context
+             and as_timestamp(states[snapshot_id].last_reported) == snapshot_reported
+             and (states(journal_id) | from_json({})) == record }}
+      - action: input_text.set_value
+        target:
+          entity_id: !input command_record
+        data:
+          value: >-
+            {{ {'v': 2, 'phase': 'ready', 'expected': booking | trim,
+                'issued': record.issued, 'booked': as_timestamp(now()),
+                't': temperature, 'generation': generation,
+                'reason': 'feedback' if packet else 'temperature'} | to_json }}
+      - stop: Estimate updated; never actuate in a feedback booking
+  # Unsolicited and paired/replayed feedback never flips a ready estimate.
+  - condition: template
+    value_template: >-
+      {{ not packet and is_state(mode_id, 'Cooling')
+         and is_state(status_id, '01') and states(switch_id) in ['on', 'off'] }}
+  - variables:
+      desired: >-
+        {% if record.phase == 'pending' %}
+          {% if clock - record.issued >= 780 and is_state(cooldown_id, 'idle')
+             and is_state(off_cooldown_id, 'idle')
+             and ((record.expected == 'on' and temperature > target + upper)
+               or (record.expected == 'off' and temperature < target - lower)) %}
+            {{ record.expected }}
+          {% else %}{{ '' }}{% endif %}
+        {% elif record.expected == 'off' and temperature > target + upper
+           and is_state(cooldown_id, 'idle')
+           and clock - record.booked >= 780 and clock - record.issued >= 780 %}on
+        {% elif record.expected == 'on' and temperature < target - lower
+           and is_state(off_cooldown_id, 'idle')
+           and clock - record.booked >= (780 if record.get('reason') == 'estimate_adopted' else 300)
+           and clock - record.issued >= (780 if record.get('reason') == 'estimate_adopted' else 300) %}off
+        {% else %}{{ '' }}{% endif %}
+  - condition: template
+    value_template: "{{ desired | trim in ['on', 'off'] }}"
+  - variables:
+      issued_at: "{{ as_timestamp(now()) }}"
+      belief_before: "{{ states(belief_id) }}"
+  - action: input_text.set_value
+    target:
+      entity_id: !input command_record
+    data:
+      value: >-
+        {{ {'v': 2, 'phase': 'pending', 'expected': desired | trim,
+            'issued': issued_at, 'booked': record.booked,
+            't': temperature, 'generation': generation,
+            'reason': 'retry' if record.phase == 'pending' else 'command'} | to_json }}
+  # Arm every protection before the physical service. Cancellation or an error
+  # retains an uncertain command, which can only be retried after the full floor.
+  - action: timer.start
+    target:
+      entity_id: !input cooldown_timer
+    data:
+      duration: 780
+  - action: timer.start
+    target:
+      entity_id: !input off_cooldown_timer
+    data:
+      duration: "{{ 300 if desired | trim == 'on' else 780 }}"
+  - if: "{{ desired | trim == 'off' }}"
+    then:
+      - action: input_number.set_value
+        target:
+          entity_id: !input temp_at_off_press
+        data:
+          value: "{{ temperature }}"
+  - condition: template
+    value_template: >-
+      {% set j = states(journal_id) | from_json({}) %}
+      {{ j is mapping and j.get('phase') == 'pending'
+         and j.get('issued') == issued_at and j.get('expected') == desired | trim
+         and j.get('generation') == generation and states(lifecycle_id) == generation
+         and is_state(controller_id, 'on')
+         and as_timestamp(states[controller_id].last_changed) == activation
+         and is_state(mode_id, 'Cooling') and is_state(status_id, '01')
+         and states(switch_id) in ['on', 'off']
+         and is_state(cooldown_id, 'active') and is_state(off_cooldown_id, 'active')
+         and states(belief_id) == belief_before
+         and as_timestamp(states[belief_id].last_reported) <= record.booked
+         and as_timestamp(states[snapshot_id].last_reported) <= record.booked
+         and is_number(states(temp_id)) and is_number(states(target_id))
+         and is_number(states(raw_temp_id))
+         and 0 <= as_timestamp(now()) - as_timestamp(states[raw_temp_id].last_reported, 0) <= 2100
+         and ((desired | trim == 'on' and states(temp_id) | float > states(target_id) | float + upper)
+           or (desired | trim == 'off' and states(temp_id) | float < states(target_id) | float - lower)) }}
+  - action: switch.toggle
+    target:
+      entity_id: !input gateway_switch
+
+mode: queued
+max: 25
+max_exceeded: warning

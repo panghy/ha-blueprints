@@ -309,3 +309,95 @@ async def test_retry_then_double_delivery_can_reconcile_and_recover(rig):
     assert rig.record["expected"] == "on"
     assert rig.record["phase"] == "ready"
     assert not rig.alerts
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("desired", ["on", "off"])
+async def test_actual_handoff_from_guard_preserves_pending_intent_and_command_age(rig, tmp_path, desired):
+    from conftest import expand
+    await rig.install("hvac_guarded_thermostat.yaml")
+    await rig.trust("off" if desired == "on" else "on")
+    await rig.set("sensor.temperature", 22.3 if desired == "on" else 21.3)
+    old = rig.record.copy()
+    assert old["phase"] == "pending"
+    assert len(rig.presses) == 1
+    await rig.advance(100)
+    config = expand(BLUEPRINT) | {"id": "test_0", "alias": "Test 0 recovery", "initial_state": True}
+    (tmp_path / "configuration.yaml").write_text(json.dumps({"automation": [config]}))
+    await rig.call("automation", "reload", {})
+    await rig.tick()
+    assert rig.record["v"] == 2
+    assert rig.record["phase"] == "pending"
+    assert rig.record["expected"] == desired
+    assert rig.record["issued"] == old["issued"]
+    assert rig.record["booked"] == old["booked"]
+    assert len(rig.presses) == 1
+    await rig.advance(679)
+    await rig.tick()
+    assert len(rig.presses) == 1
+    await rig.advance(1)
+    await rig.tick()
+    assert len(rig.presses) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("desired", ["on", "off"])
+async def test_lost_command_history_and_timer_state_preserve_full_repeat_floor(rig, desired):
+    await pending(rig, desired)
+    await rig.advance(1)
+    await rig.call("input_text", "set_value", {
+        "entity_id": "input_text.command",
+        "value": '{"v":1,"phase":"needs_verification","reason":"startup"}'})
+    await rig.tick()  # Represents a restart with both timers restored idle.
+    assert rig.record["reason"] == "estimate_adopted"
+    await rig.advance(300)
+    await rig.tick()
+    assert len(rig.presses) == 1
+    await rig.advance(479)
+    await rig.tick()
+    assert len(rig.presses) == 1
+    await rig.advance(1)
+    await rig.tick()
+    assert len(rig.presses) == 2
+
+@pytest.mark.asyncio
+async def test_established_on_feedback_retains_five_minute_normal_off_minimum(rig):
+    await pending(rig, "on")
+    await rig.advance(30)
+    await rig.set("sensor.feedback", "0500010154000300")
+    await rig.set("sensor.feedback", "01")
+    await rig.set("sensor.temperature", 21.3)
+    await rig.advance(299)
+    await rig.tick()
+    assert len(rig.presses) == 1
+    await rig.advance(1)
+    await rig.tick()
+    assert len(rig.presses) == 2
+    assert rig.record["expected"] == "off"
+
+
+@pytest.mark.asyncio
+async def test_pending_on_thermal_booking_accepts_float_serialization_noise(rig):
+    await pending(rig, "on")
+    await rig.advance(779)
+    await rig.set("sensor.temperature", 22.3 - 0.4)
+    await rig.tick()
+    assert rig.record["phase"] == "pending"
+    await rig.advance(1)
+    await rig.tick()
+    assert rig.record["phase"] == "ready"
+    assert rig.record["expected"] == "on"
+    assert rig.record["reason"] == "temperature"
+    assert len(rig.presses) == 1
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("temperature", [22.3 - 0.4, 22 + 4e-15])
+async def test_feedback_booking_handles_normalized_changed_or_unchanged_snapshot(rig, temperature):
+    await pending(rig, "on")
+    await rig.advance(30)
+    await rig.set("sensor.temperature", temperature)
+    await rig.set("sensor.feedback", "0500010154000300")
+    assert rig.record["phase"] == "ready"
+    assert rig.record["expected"] == "on"
+    assert rig.record["reason"] == "feedback"
+    assert len(rig.presses) == 1

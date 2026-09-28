@@ -210,6 +210,35 @@ actions:
          and states(belief_id) in ['on', 'off'] and is_number(states(snapshot_id))
          and states(cooldown_id) in ['idle', 'active', 'paused']
          and states(off_cooldown_id) in ['idle', 'active', 'paused'] }}
+  # Carry a guarded controller's known command age through an in-place handoff.
+  # A pending ON has no stored command-temperature baseline in v1: start its
+  # thermal observation at the current sample; never invent a historical value.
+  - if: >-
+      {{ record is mapping and record.get('v') == 1
+         and record.get('phase') in ['verified', 'ready', 'pending']
+         and record.get('expected') in ['on', 'off']
+         and record.get('issued') is number and is_number(record.get('issued'))
+         and record.get('booked') is number and is_number(record.get('booked'))
+         and 0 <= record.issued <= clock and 0 < record.booked <= clock
+         and (record.phase != 'pending' or record.issued >= record.booked)
+         and as_timestamp(states[belief_id].last_reported) <= record.booked
+         and as_timestamp(states[snapshot_id].last_reported) <= record.booked
+         and states(belief_id) == (record.expected if record.phase != 'pending'
+              else ('off' if record.expected == 'on' else 'on')) }}
+    then:
+      - action: input_text.set_value
+        target:
+          entity_id: !input command_record
+        data:
+          value: >-
+            {{ {'v': 2, 'phase': 'pending' if record.phase == 'pending' else 'ready',
+                'expected': record.expected, 'issued': record.issued, 'booked': record.booked,
+                't': (states(off_snapshot_id) | float(temperature)
+                       if record.phase == 'pending' and record.expected == 'off'
+                       else temperature if record.phase == 'pending'
+                       else states(snapshot_id) | float),
+                'generation': generation, 'reason': 'migration'} | to_json }}
+      - stop: Previous command carried forward; no actuation during migration
   - variables:
       valid: >-
         {{ record is mapping and record.get('v') == 2
@@ -282,7 +311,9 @@ actions:
           snapshot_before: "{{ states(snapshot_id) | float(none) }}"
           snapshot_context_before: "{{ states[snapshot_id].context.id }}"
           snapshot_reported_before: "{{ as_timestamp(states[snapshot_id].last_reported) }}"
-      - if: "{{ snapshot_before != temperature }}"
+      # HA normalizes numeric state strings; tolerate representation noise only.
+      # Context and report timestamps still detect same-value external writes.
+      - if: "{{ (snapshot_before - temperature) | abs > 0.000001 }}"
         then:
           - action: input_number.set_value
             target:
@@ -291,14 +322,15 @@ actions:
               value: "{{ temperature }}"
       - condition: template
         value_template: >-
-          {{ states(snapshot_id) | float(none) == temperature
+          {{ is_number(states(snapshot_id))
+             and (states(snapshot_id) | float - temperature) | abs <= 0.000001
              and is_state(controller_id, 'on')
              and as_timestamp(states[controller_id].last_changed) == activation
              and states(lifecycle_id) == generation
-             and ((snapshot_before != temperature
+             and (((snapshot_before - temperature) | abs > 0.000001
                    and states[snapshot_id].context.id == context.id
                    and states[snapshot_id].last_reported == states[snapshot_id].last_updated)
-               or (snapshot_before == temperature and states[snapshot_id].context.id == snapshot_context_before
+               or ((snapshot_before - temperature) | abs <= 0.000001 and states[snapshot_id].context.id == snapshot_context_before
                    and as_timestamp(states[snapshot_id].last_reported) == snapshot_reported_before))
              and as_timestamp(states[belief_id].last_reported) <= record.booked
              and (states(journal_id) | from_json({})) == record }}
@@ -348,7 +380,8 @@ actions:
            and clock - record.booked >= 780 and clock - record.issued >= 780 %}on
         {% elif record.expected == 'on' and temperature < target - lower
            and is_state(off_cooldown_id, 'idle')
-           and clock - record.booked >= 300 and clock - record.issued >= 300 %}off
+           and clock - record.booked >= (780 if record.get('reason') == 'estimate_adopted' else 300)
+           and clock - record.issued >= (780 if record.get('reason') == 'estimate_adopted' else 300) %}off
         {% else %}{{ '' }}{% endif %}
   - condition: template
     value_template: "{{ desired | trim in ['on', 'off'] }}"

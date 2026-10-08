@@ -92,8 +92,28 @@ blueprint:
       selector:
         entity:
           domain: switch
+    command_transport:
+      name: Fingerbot command transport
+      description: >-
+        Xiaomi BLE waits for gateway packets. ZHA CLICK books this run's intent
+        only after its switch service returns successfully. Neither is proof of
+        AC power. Leave other rooms on their existing transport.
+      default: xiaomi_ble
+      selector:
+        select:
+          options:
+            - xiaomi_ble
+            - zha_click
+    fingerbot_mode:
+      name: ZHA Fingerbot mode selector
+      description: Required for zha_click; commands are held unless it reads CLICK.
+      default: []
+      selector:
+        entity:
+          domain: select
     gateway_status:
-      name: Fingerbot feedback sensor
+      name: Xiaomi BLE feedback sensor (unused for ZHA)
+      default: []
       selector:
         entity:
           domain: sensor
@@ -138,6 +158,8 @@ variables:
   mode_id: !input hvac_mode_select
   switch_id: !input gateway_switch
   status_id: !input gateway_status
+  transport: !input command_transport
+  fingerbot_mode_id: !input fingerbot_mode
   upper: !input upper_offset
   lower: !input lower_offset
   notify_service: !input alert_notify_service
@@ -151,6 +173,9 @@ triggers:
     entity_id: !input gateway_status
     to: null
     id: feedback
+  - trigger: state
+    entity_id: !input fingerbot_mode
+    id: evaluate
   - trigger: state
     entity_id: !input gateway_switch
     to: null
@@ -250,7 +275,7 @@ actions:
            and 0 <= record.issued <= clock and 0 < record.booked <= clock
            and (record.phase != 'pending' or record.issued >= record.booked) }}
       packet: >-
-        {{ kind == 'feedback' and trigger.to_state is not none
+        {{ transport == 'xiaomi_ble' and kind == 'feedback' and trigger.to_state is not none
            and trigger.from_state is not none
            and trigger.to_state.state.startswith('0500')
            and (trigger.from_state.state in ['01', '00']
@@ -305,8 +330,10 @@ actions:
             {% else %}{{ '' }}{% endif %}
           {% else %}{{ '' }}{% endif %}
         {% else %}{{ '' }}{% endif %}
+  - variables:
+      booking_reason: "{{ 'feedback' if packet else 'temperature' }}"
   - if: "{{ booking | trim in ['on', 'off'] }}"
-    then:
+    then: &book_estimate
       - variables:
           snapshot_before: "{{ states(snapshot_id) | float(none) }}"
           snapshot_context_before: "{{ states[snapshot_id].context.id }}"
@@ -359,13 +386,14 @@ actions:
             {{ {'v': 2, 'phase': 'ready', 'expected': booking | trim,
                 'issued': record.issued, 'booked': as_timestamp(now()),
                 't': temperature, 'generation': generation,
-                'reason': 'feedback' if packet else 'temperature'} | to_json }}
+                'reason': booking_reason} | to_json }}
       - stop: Estimate updated; never actuate in a feedback booking
   # Unsolicited and paired/replayed feedback never flips a ready estimate.
   - condition: template
     value_template: >-
       {{ not packet and is_state(mode_id, 'Cooling')
-         and is_state(status_id, '01') and states(switch_id) in ['on', 'off'] }}
+         and ((transport == 'xiaomi_ble' and is_state(status_id, '01'))
+           or (transport == 'zha_click' and is_state(fingerbot_mode_id, 'CLICK'))) and states(switch_id) in ['on', 'off'] }}
   - variables:
       desired: >-
         {% if record.phase == 'pending' %}
@@ -424,7 +452,8 @@ actions:
          and j.get('generation') == generation and states(lifecycle_id) == generation
          and is_state(controller_id, 'on')
          and as_timestamp(states[controller_id].last_changed) == activation
-         and is_state(mode_id, 'Cooling') and is_state(status_id, '01')
+         and is_state(mode_id, 'Cooling') and ((transport == 'xiaomi_ble' and is_state(status_id, '01'))
+           or (transport == 'zha_click' and is_state(fingerbot_mode_id, 'CLICK')))
          and states(switch_id) in ['on', 'off']
          and is_state(cooldown_id, 'active') and is_state(off_cooldown_id, 'active')
          and states(belief_id) == belief_before
@@ -435,9 +464,40 @@ actions:
          and 0 <= as_timestamp(now()) - as_timestamp(states[raw_temp_id].last_reported, 0) <= 2100
          and ((desired | trim == 'on' and states(temp_id) | float > states(target_id) | float + upper)
            or (desired | trim == 'off' and states(temp_id) | float < states(target_id) | float - lower)) }}
+  - variables:
+      pending_before: "{{ states(journal_id) | from_json({}) }}"
+      switch_after: "{{ 'off' if is_state(switch_id, 'on') else 'on' }}"
+  # The ZHA switch implementation awaits the cluster SUCCESS response and raises
+  # on failure. Do not continue_on_error: an uncertain call must remain pending.
   - action: switch.toggle
     target:
       entity_id: !input gateway_switch
+
+  # Only this completed service can acknowledge a ZHA command. Restored state,
+  # unrelated switch reports and old BLE packets never acknowledge it. Recheck
+  # run ownership and external corrections across the yielding radio service.
+  - condition: template
+    value_template: >-
+      {{ transport == 'zha_click'
+         and states(switch_id) == switch_after
+         and states[switch_id].context.id == context.id
+         and as_timestamp(states[switch_id].last_updated) >= issued_at
+         and (states(journal_id) | from_json({})) == pending_before
+         and is_state(controller_id, 'on')
+         and as_timestamp(states[controller_id].last_changed) == activation
+         and states(lifecycle_id) == generation
+         and is_state(fingerbot_mode_id, 'CLICK')
+         and states(belief_id) == belief_before
+         and as_timestamp(states[belief_id].last_reported) <= record.booked
+         and as_timestamp(states[snapshot_id].last_reported) <= record.booked
+         and is_number(states(temp_id)) }}
+  - variables:
+      record: "{{ states(journal_id) | from_json({}) }}"
+      temperature: "{{ states(temp_id) | float }}"
+      booking: "{{ desired | trim }}"
+      booking_reason: zigbee_ack
+  - if: "{{ true }}"
+    then: *book_estimate
 
 mode: queued
 max: 25

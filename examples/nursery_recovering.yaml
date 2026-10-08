@@ -1,13 +1,12 @@
-# Replace only the automation section of nursery_guarded.yaml with this block.
-# Keep its existing helpers, passive lifecycle marker and optional physical-check
-# script. Only this controller writes power: legacy thermostat/listener and
+# Replace the automation and optional preparation script sections in
+# nursery_guarded.yaml. Keep existing helpers and the passive lifecycle marker. Only this controller writes power: legacy thermostat/listener and
 # Phase B remain OFF; shared startup resync must still exclude the nursery.
 # User-selected automatic recovery accepts delayed/double-toggle ambiguity.
 # No physical-reset ticket is needed after timeout, reload, restart or reconnect.
 # The existing alert automations, temperature settings and minimum intervals stay.
 automation:
   - id: nursery_guarded_thermostat
-    alias: Nursery HVAC Automatic Recovery
+    alias: Nursery HVAC Zigbee Automatic Recovery
     initial_state: true
     use_blueprint:
       path: panghy/hvac_recovering_thermostat.yaml
@@ -24,10 +23,84 @@ automation:
         cooldown_timer: timer.nursery_hvac_cooldown
         off_cooldown_timer: timer.nursery_hvac_off_cooldown
         hvac_mode_select: input_select.house_hvac_mode
-        gateway_switch: switch.adp_cn_976148245_adgw_switch_b_p_2_6
-        gateway_status: sensor.adp_cn_976148245_adgw_status_b_p_2_7
+        # Only the nursery's hardware has been replaced. CLICK mode emits a
+        # momentary press on either switch transition; switch state is not AC state.
+        command_transport: zha_click
+        gateway_switch: switch.er_tong_fang_nursery_hvac_toggle
+        fingerbot_mode: select.er_tong_fang_nursery_hvac_toggle_mode
         upper_offset: 0.7
         lower_offset: -0.5
         # Same standard recipient as the prior suspicious-late listener notice.
         # No critical push, TTS, or new recipient is introduced here.
         alert_notify_service: notify.mobile_app_clements_iphone
+
+# Optional manual correction remains non-actuating and does not enable control.
+script:
+  nursery_prepare_verified_belief:
+    alias: Nursery prepare physically verified belief (does not enable control)
+    mode: single
+    fields:
+      physically_verified:
+        required: true
+        selector:
+          # Null survives HA's package merge; an empty mapping is discarded.
+          boolean: null
+      cooling:
+        required: true
+        selector:
+          boolean: null
+    sequence:
+      - condition: template
+        value_template: "{{ physically_verified | default(false) == true and cooling is boolean }}"
+      - condition: state
+        entity_id: automation.nursery_guarded_thermostat
+        state: 'off'
+      - condition: template
+        value_template: "{{ state_attr('automation.nursery_guarded_thermostat', 'current') == 0 }}"
+      - condition: state
+        entity_id: automation.nursery_hvac_automation
+        state: 'off'
+      - condition: state
+        entity_id: automation.nursery_hvac_press_listener
+        state: 'off'
+      - condition: state
+        entity_id: input_boolean.nursery_lost_press_recovery
+        state: 'off'
+      - condition: template
+        value_template: >-
+          {{ is_number(states('sensor.nursery_temperature'))
+             and states('sensor.nursery_hvac_lifecycle') not in ['', 'unknown', 'unavailable']
+             and is_state('select.er_tong_fang_nursery_hvac_toggle_mode', 'CLICK')
+             and states('switch.er_tong_fang_nursery_hvac_toggle') in ['on', 'off'] }}
+      - variables:
+          check_started: "{{ as_timestamp(now()) }}"
+          controller_origin: "{{ states.automation.nursery_guarded_thermostat.context.id }}"
+          lifecycle_generation: "{{ states('sensor.nursery_hvac_lifecycle') }}"
+      # Invalidate any old record before touching either helper.
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.nursery_hvac_command
+        data:
+          value: '{"v":1,"phase":"needs_verification","reason":"physical_check"}'
+      - action: script.hvac_set_belief
+        data:
+          room: nursery
+          cooling: "{{ cooling }}"
+      - condition: template
+        value_template: >-
+          {{ states('input_boolean.nursery_hvac_cooling_active') == ('on' if cooling else 'off')
+             and is_state('automation.nursery_guarded_thermostat', 'off')
+             and state_attr('automation.nursery_guarded_thermostat', 'current') == 0
+             and states.automation.nursery_guarded_thermostat.context.id == controller_origin
+             and states('sensor.nursery_hvac_lifecycle') == lifecycle_generation
+             and is_number(states('input_number.nursery_hvac_temp_at_toggle'))
+             and as_timestamp(states.input_boolean.nursery_hvac_cooling_active.last_reported) >= check_started
+             and as_timestamp(states.input_number.nursery_hvac_temp_at_toggle.last_reported) >= check_started }}
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.nursery_hvac_command
+        data:
+          value: >-
+            {{ {'v': 1, 'phase': 'verified', 'expected': 'on' if cooling else 'off',
+                'issued': 0, 'booked': as_timestamp(now()), 'reason': 'physical_check',
+                'origin': controller_origin, 'generation': lifecycle_generation} | to_json }}

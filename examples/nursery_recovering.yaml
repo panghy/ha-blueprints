@@ -7,7 +7,7 @@
 # The existing alert automations, temperature settings and minimum intervals stay.
 automation:
   - id: nursery_guarded_thermostat
-    alias: Nursery HVAC Automatic Recovery
+    alias: Nursery HVAC Zigbee Automatic Recovery
     initial_state: true
     use_blueprint:
       path: panghy/hvac_recovering_thermostat.yaml
@@ -24,8 +24,11 @@ automation:
         cooldown_timer: timer.nursery_hvac_cooldown
         off_cooldown_timer: timer.nursery_hvac_off_cooldown
         hvac_mode_select: input_select.house_hvac_mode
-        gateway_switch: switch.adp_cn_976148245_adgw_switch_b_p_2_6
-        gateway_status: sensor.adp_cn_976148245_adgw_status_b_p_2_7
+        # Only the nursery's hardware has been replaced. CLICK mode emits a
+        # momentary press on either switch transition; switch state is not AC state.
+        command_transport: zha_click
+        gateway_switch: switch.er_tong_fang_nursery_hvac_toggle
+        fingerbot_mode: select.er_tong_fang_nursery_hvac_toggle_mode
         upper_offset: 0.7
         lower_offset: -0.5
         # Same standard recipient as the prior suspicious-late listener notice.

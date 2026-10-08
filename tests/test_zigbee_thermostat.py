@@ -169,3 +169,22 @@ async def test_zigbee_instance_does_not_require_a_ble_sensor(rig):
     await rig.set("sensor.temperature",22.3)
     assert len(rig.presses) == 1
     assert rig.record["reason"] == "zigbee_ack"
+
+@pytest.mark.parametrize("verified,mode,corrected", [(True,"CLICK",True),(False,"CLICK",False),(True,"SWITCH",False),(True,"unavailable",False)])
+async def test_optional_preparation_uses_zigbee_readiness_without_actuation(rig, monkeypatch, verified, mode, corrected):
+    import test_nursery_package as package_test
+    from homeassistant.util import yaml as yaml_util
+    from conftest import ROOT
+    package = yaml_util.load_yaml(str(ROOT / "examples/nursery_recovering.yaml"))
+    monkeypatch.setattr(package_test, "PACKAGE", package)
+    monkeypatch.setattr(package_test, "MAPPING", package_test.MAPPING | {
+        "switch.er_tong_fang_nursery_hvac_toggle": "switch.fingerbot",
+        "select.er_tong_fang_nursery_hvac_toggle_mode": "select.fingerbot_mode",
+    })
+    corrections = await package_test.prepare(rig)
+    await rig.set("sensor.feedback", "unavailable")
+    await rig.set("select.fingerbot_mode",mode)
+    await rig.call("script", "nursery_prepare_verified_belief", {"physically_verified":verified,"cooling":False})
+    assert bool(corrections) is corrected
+    assert rig.hass.states.get("automation.test_0").state == "off"
+    assert not rig.presses

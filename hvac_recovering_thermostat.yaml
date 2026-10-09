@@ -125,9 +125,23 @@ blueprint:
           min: 0.1
           max: 2
           step: 0.1
+    zha_min_off_minutes:
+      name: Minimum OFF time after an acknowledged ZHA command
+      description: >-
+        Opt in to 5–13 minutes between an acknowledged OFF and the next ON.
+        Only applies to zha_click. Failed/unacknowledged commands, adopted or
+        temperature-derived estimates and BLE still require 13 minutes.
+        The minimum ON time remains 5 minutes. Existing active timers are respected.
+      default: 13
+      selector:
+        number:
+          min: 5
+          max: 13
+          step: 1
+          unit_of_measurement: min
     lower_offset:
       name: Stop below target minus this offset
-      description: Nursery uses -0.5, stopping below target plus 0.5 degrees.
+      description: Negative values stop above target to allow for temperature sampling and residual cooling.
       default: -0.5
       selector:
         number:
@@ -162,6 +176,7 @@ variables:
   fingerbot_mode_id: !input fingerbot_mode
   upper: !input upper_offset
   lower: !input lower_offset
+  zha_min_off: !input zha_min_off_minutes
   notify_service: !input alert_notify_service
 
 triggers:
@@ -219,6 +234,9 @@ actions:
   # lifecycle while a service yields abort that run, then reconcile next run.
   - variables:
       record: "{{ states(journal_id) | from_json({}) }}"
+      restart_seconds: >-
+        {{ (([5, ([zha_min_off | float(13), 13] | min)] | max) * 60) | int
+           if transport == 'zha_click' else 780 }}
       clock: "{{ as_timestamp(now()) }}"
       temperature: "{{ states(temp_id) | float(none) }}"
       target: "{{ states(target_id) | float(none) }}"
@@ -395,6 +413,8 @@ actions:
          and ((transport == 'xiaomi_ble' and is_state(status_id, '01'))
            or (transport == 'zha_click' and is_state(fingerbot_mode_id, 'CLICK'))) and states(switch_id) in ['on', 'off'] }}
   - variables:
+      off_wait: "{{ restart_seconds if transport == 'zha_click' and record.get('reason') == 'zigbee_ack' else 780 }}"
+  - variables:
       desired: >-
         {% if record.phase == 'pending' %}
           {% if clock - record.issued >= 780 and is_state(cooldown_id, 'idle')
@@ -405,7 +425,7 @@ actions:
           {% else %}{{ '' }}{% endif %}
         {% elif record.expected == 'off' and temperature > target + upper
            and is_state(cooldown_id, 'idle')
-           and clock - record.booked >= 780 and clock - record.issued >= 780 %}on
+           and clock - record.booked >= off_wait and clock - record.issued >= off_wait %}on
         {% elif record.expected == 'on' and temperature < target - lower
            and is_state(off_cooldown_id, 'idle')
            and clock - record.booked >= (780 if record.get('reason') == 'estimate_adopted' else 300)
@@ -425,18 +445,20 @@ actions:
             'issued': issued_at, 'booked': record.booked,
             't': temperature, 'generation': generation,
             'reason': 'retry' if record.phase == 'pending' else 'command'} | to_json }}
-  # Arm every protection before the physical service. Cancellation or an error
-  # retains an uncertain command, which can only be retried after the full floor.
+  # Arm the cycle timers before the physical service. The journal separately
+  # enforces the full 13-minute retry/reconciliation floor for uncertain calls,
+  # even when the opt-in ZHA OFF timers expire earlier. Only a matching ZHA ACK
+  # permits the shorter normal restart interval; never infer it from timer expiry.
   - action: timer.start
     target:
       entity_id: !input cooldown_timer
     data:
-      duration: 780
+      duration: "{{ restart_seconds if desired | trim == 'off' else 780 }}"
   - action: timer.start
     target:
       entity_id: !input off_cooldown_timer
     data:
-      duration: "{{ 300 if desired | trim == 'on' else 780 }}"
+      duration: "{{ 300 if desired | trim == 'on' else restart_seconds }}"
   - if: "{{ desired | trim == 'off' }}"
     then:
       - action: input_number.set_value

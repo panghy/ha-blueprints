@@ -1,0 +1,358 @@
+[
+  {
+    "id": "1776159967286",
+    "alias": "HVAC Toggle Thermostat",
+    "description": "",
+    "use_blueprint": {
+      "path": "panghy/hvac_toggle_thermostat.yaml",
+      "input": {
+        "temp_sensor": "sensor.study_effective_temperature",
+        "target_temp": "input_number.study_target_temperature",
+        "cooling_active": "input_boolean.study_hvac_cooling_active",
+        "temp_at_toggle": "input_number.study_hvac_temp_at_toggle",
+        "cooldown_timer": "timer.study_hvac_cooldown",
+        "hvac_mode_select": "input_select.house_hvac_mode",
+        "gateway_connect": "switch.adp_cn_976148245_adgw_connect_a_p_2_4",
+        "gateway_switch": "switch.adp_cn_976148245_adgw_switch_a_p_2_2",
+        "gateway_status": "sensor.adp_cn_976148245_adgw_status_a_p_2_3",
+        "cooldown_minutes": 10,
+        "upper_offset": 0.5,
+        "lower_offset": 0.1,
+        "off_cooldown_timer": "timer.study_hvac_off_cooldown",
+        "post_on_cooldown_minutes": 5
+      }
+    }
+  },
+  {
+    "id": "1776167491572",
+    "alias": "Master Bedroom HVAC Automation",
+    "description": "",
+    "use_blueprint": {
+      "path": "panghy/hvac_toggle_thermostat.yaml",
+      "input": {
+        "temp_sensor": "sensor.master_bedroom_effective_temperature",
+        "target_temp": "input_number.master_bedroom_target_temperature",
+        "cooling_active": "input_boolean.master_bedroom_hvac_cooling_active",
+        "temp_at_toggle": "input_number.master_bedroom_temp_at_toggle",
+        "cooldown_timer": "timer.master_bedroom_hvac_cooldown",
+        "hvac_mode_select": "input_select.house_hvac_mode",
+        "gateway_connect": "switch.adp_cn_976148245_adgw_connect_c_p_2_12",
+        "gateway_switch": "switch.adp_cn_976148245_adgw_switch_c_p_2_10",
+        "gateway_status": "sensor.adp_cn_976148245_adgw_status_c_p_2_11",
+        "cooldown_minutes": 10,
+        "upper_offset": 0.2,
+        "lower_offset": 0.0,
+        "off_cooldown_timer": "timer.master_bedroom_hvac_off_cooldown",
+        "post_on_cooldown_minutes": 5
+      }
+    }
+  },
+  {
+    "id": "1778380443908",
+    "alias": "Dining Room HVAC Automation",
+    "description": "",
+    "use_blueprint": {
+      "path": "panghy/hvac_toggle_thermostat.yaml",
+      "input": {
+        "temp_sensor": "sensor.xiaomi_cn_860672267_ua3_temperature_p_3_7",
+        "target_temp": "input_number.dining_room_target_temperature",
+        "cooling_active": "input_boolean.dining_room_hvac_cooling_active",
+        "temp_at_toggle": "input_number.dining_room_temp_at_toggle",
+        "cooldown_timer": "timer.dining_room_hvac_cooldown",
+        "hvac_mode_select": "input_select.house_hvac_mode",
+        "gateway_connect": "switch.adp_cn_975356665_adgw_connect_a_p_2_4",
+        "gateway_switch": "switch.adp_cn_975356665_adgw_switch_a_p_2_2",
+        "gateway_status": "sensor.adp_cn_975356665_adgw_status_a_p_2_3",
+        "upper_offset": 0.4,
+        "lower_offset": -0.2,
+        "off_cooldown_timer": "timer.dining_room_hvac_off_cooldown",
+        "post_on_cooldown_minutes": 5
+      }
+    }
+  },
+  {
+    "id": "1780020719265",
+    "alias": "Living Room HVAC Automation",
+    "description": "",
+    "use_blueprint": {
+      "path": "panghy/hvac_toggle_thermostat.yaml",
+      "input": {
+        "temp_sensor": "sensor.living_room_temperature",
+        "target_temp": "input_number.living_room_target_temperature",
+        "cooling_active": "input_boolean.living_room_hvac_cooling_active",
+        "temp_at_toggle": "input_number.living_room_temp_at_toggle",
+        "cooldown_timer": "timer.living_room_hvac_cooldown",
+        "hvac_mode_select": "input_select.house_hvac_mode",
+        "gateway_connect": "switch.adp_cn_975356665_adgw_connect_b_p_2_8",
+        "gateway_switch": "switch.adp_cn_975356665_adgw_switch_b_p_2_6",
+        "gateway_status": "sensor.adp_cn_975356665_adgw_status_b_p_2_7",
+        "upper_offset": 0.4,
+        "lower_offset": -0.2,
+        "off_cooldown_timer": "timer.living_room_hvac_off_cooldown",
+        "post_on_cooldown_minutes": 5,
+        "cooldown_minutes": 13
+      }
+    },
+    "mode": "single"
+  },
+  {
+    "id": "1787025332042",
+    "alias": "Study HVAC Press Listener",
+    "description": "",
+    "use_blueprint": {
+      "path": "panghy/hvac_press_listener.yaml",
+      "input": {
+        "gateway_status": "sensor.adp_cn_976148245_adgw_status_a_p_2_3",
+        "cooling_active": "input_boolean.study_hvac_cooling_active",
+        "temp_at_toggle": "input_number.study_hvac_temp_at_toggle",
+        "temp_sensor": "sensor.study_effective_temperature",
+        "gateway_switch": "switch.adp_cn_976148245_adgw_switch_a_p_2_2"
+      }
+    }
+  },
+  {
+    "id": "1787025332046",
+    "alias": "Master Bedroom HVAC Press Listener",
+    "description": "",
+    "use_blueprint": {
+      "path": "panghy/hvac_press_listener.yaml",
+      "input": {
+        "gateway_status": "sensor.adp_cn_976148245_adgw_status_c_p_2_11",
+        "cooling_active": "input_boolean.master_bedroom_hvac_cooling_active",
+        "temp_at_toggle": "input_number.master_bedroom_temp_at_toggle",
+        "temp_sensor": "sensor.master_bedroom_effective_temperature",
+        "gateway_switch": "switch.adp_cn_976148245_adgw_switch_c_p_2_10"
+      }
+    }
+  },
+  {
+    "id": "1787025332048",
+    "alias": "Dining Room HVAC Press Listener",
+    "description": "",
+    "use_blueprint": {
+      "path": "panghy/hvac_press_listener.yaml",
+      "input": {
+        "gateway_status": "sensor.adp_cn_975356665_adgw_status_a_p_2_3",
+        "cooling_active": "input_boolean.dining_room_hvac_cooling_active",
+        "temp_at_toggle": "input_number.dining_room_temp_at_toggle",
+        "temp_sensor": "sensor.xiaomi_cn_860672267_ua3_temperature_p_3_7",
+        "gateway_switch": "switch.adp_cn_975356665_adgw_switch_a_p_2_2"
+      }
+    }
+  },
+  {
+    "id": "1787025332050",
+    "alias": "Living Room HVAC Press Listener",
+    "description": "",
+    "use_blueprint": {
+      "path": "panghy/hvac_press_listener.yaml",
+      "input": {
+        "gateway_status": "sensor.adp_cn_975356665_adgw_status_b_p_2_7",
+        "cooling_active": "input_boolean.living_room_hvac_cooling_active",
+        "temp_at_toggle": "input_number.living_room_temp_at_toggle",
+        "temp_sensor": "sensor.living_room_temperature",
+        "gateway_switch": "switch.adp_cn_975356665_adgw_switch_b_p_2_6"
+      }
+    }
+  },
+  {
+    "id": "1788478600000",
+    "alias": "HVAC Startup Belief Resync",
+    "description": "",
+    "triggers": [
+      {
+        "trigger": "homeassistant",
+        "event": "start"
+      }
+    ],
+    "conditions": [],
+    "actions": [
+      {
+        "delay": {
+          "minutes": 3
+        }
+      },
+      {
+        "variables": {
+          "start_temps": "{{ dict(zip(rooms | map(attribute='key') | list, rooms | map(attribute='temp_sensor') | map('states') | list)) }}"
+        }
+      },
+      {
+        "delay": {
+          "minutes": 17
+        }
+      },
+      {
+        "repeat": {
+          "for_each": "{{ rooms }}",
+          "sequence": [
+            {
+              "variables": {
+                "room": "{{ repeat.item }}",
+                "t0": "{{ start_temps[repeat.item.key] }}",
+                "t1": "{{ states(repeat.item.temp_sensor) }}"
+              }
+            },
+            {
+              "if": [
+                {
+                  "condition": "template",
+                  "value_template": "{{ states('input_select.house_hvac_mode') == 'Cooling' and is_state(room.cooling_active, 'off') and (now() - states[room.cooling_active].last_changed).total_seconds() >= belief_off_dwell_minutes | float * 60 and is_state(room.cooldown_timer, 'idle') and t0 is not none and t0 not in ['unknown', 'unavailable'] and t1 not in ['unknown', 'unavailable'] and (t0 | float(-999)) - (t1 | float(999)) >= fall_threshold | float }}"
+                }
+              ],
+              "then": [
+                {
+                  "action": "persistent_notification.create",
+                  "data": {
+                    "notification_id": "hvac_startup_resync_{{ room.key }}",
+                    "title": "HVAC startup resync: {{ room.name }} corrected",
+                    "message": "{{ room.name }}: cooling was believed OFF after the HA restart, but the room fell {{ ((t0 | float(0)) - (t1 | float(0))) | round(1) }}\u00b0C ({{ t0 }} \u2192 {{ t1 }}\u00b0C) across the ~20 min startup verification window with the cooldown idle \u2014 the AC is physically ON (post-outage auto-restart). Auto-correcting: belief set to on, then one toggle press to drive the AC to a known OFF state (the press listener re-syncs the belief when the blip lands). Normal thermostat control resumes from there."
+                  }
+                },
+                {
+                  "if": [
+                    {
+                      "condition": "template",
+                      "value_template": "{{ room.critical | default(false) }}"
+                    }
+                  ],
+                  "then": [
+                    {
+                      "action": "notify.mobile_app_clements_iphone",
+                      "data": {
+                        "title": "HVAC startup resync: {{ room.name }} corrected",
+                        "message": "{{ room.name }}: cooling was believed OFF after the HA restart, but the room fell {{ ((t0 | float(0)) - (t1 | float(0))) | round(1) }}\u00b0C ({{ t0 }} \u2192 {{ t1 }}\u00b0C) across the ~20 min startup verification window with the cooldown idle \u2014 the AC is physically ON (post-outage auto-restart). Auto-correcting: belief set to on, then one toggle press to drive the AC to a known OFF state (the press listener re-syncs the belief when the blip lands). Normal thermostat control resumes from there.",
+                        "data": {
+                          "push": {
+                            "sound": {
+                              "name": "default",
+                              "critical": 1,
+                              "volume": 1.0
+                            }
+                          }
+                        }
+                      }
+                    }
+                  ],
+                  "else": [
+                    {
+                      "action": "notify.mobile_app_clements_iphone",
+                      "data": {
+                        "title": "HVAC startup resync: {{ room.name }} corrected",
+                        "message": "{{ room.name }}: cooling was believed OFF after the HA restart, but the room fell {{ ((t0 | float(0)) - (t1 | float(0))) | round(1) }}\u00b0C ({{ t0 }} \u2192 {{ t1 }}\u00b0C) across the ~20 min startup verification window with the cooldown idle \u2014 the AC is physically ON (post-outage auto-restart). Auto-correcting: belief set to on, then one toggle press to drive the AC to a known OFF state (the press listener re-syncs the belief when the blip lands). Normal thermostat control resumes from there."
+                      }
+                    }
+                  ]
+                },
+                {
+                  "action": "input_boolean.turn_on",
+                  "target": {
+                    "entity_id": "{{ room.cooling_active }}"
+                  }
+                },
+                {
+                  "delay": {
+                    "seconds": 60
+                  }
+                },
+                {
+                  "if": [
+                    {
+                      "condition": "template",
+                      "value_template": "{{ states(room.gateway_status) == '01' }}"
+                    }
+                  ],
+                  "then": [
+                    {
+                      "action": "switch.toggle",
+                      "target": {
+                        "entity_id": "{{ room.gateway_switch }}"
+                      }
+                    },
+                    {
+                      "action": "timer.start",
+                      "target": {
+                        "entity_id": "{{ room.cooldown_timer }}"
+                      },
+                      "data": {
+                        "duration": {
+                          "minutes": "{{ press_cooldown_minutes | int }}"
+                        }
+                      }
+                    },
+                    {
+                      "action": "timer.start",
+                      "target": {
+                        "entity_id": "{{ room.off_cooldown_timer }}"
+                      },
+                      "data": {
+                        "duration": {
+                          "minutes": "{{ press_cooldown_minutes | int }}"
+                        }
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      }
+    ],
+    "variables": {
+      "settle_minutes": 3,
+      "window_minutes": 17,
+      "fall_threshold": 0.5,
+      "belief_off_dwell_minutes": 15,
+      "press_cooldown_minutes": 10,
+      "rooms": [
+        {
+          "key": "study",
+          "name": "Study",
+          "critical": false,
+          "temp_sensor": "sensor.study_effective_temperature",
+          "cooling_active": "input_boolean.study_hvac_cooling_active",
+          "cooldown_timer": "timer.study_hvac_cooldown",
+          "off_cooldown_timer": "timer.study_hvac_off_cooldown",
+          "gateway_switch": "switch.adp_cn_976148245_adgw_switch_a_p_2_2",
+          "gateway_status": "sensor.adp_cn_976148245_adgw_status_a_p_2_3"
+        },
+        {
+          "key": "master_bedroom",
+          "name": "Master Bedroom",
+          "critical": false,
+          "temp_sensor": "sensor.master_bedroom_effective_temperature",
+          "cooling_active": "input_boolean.master_bedroom_hvac_cooling_active",
+          "cooldown_timer": "timer.master_bedroom_hvac_cooldown",
+          "off_cooldown_timer": "timer.master_bedroom_hvac_off_cooldown",
+          "gateway_switch": "switch.adp_cn_976148245_adgw_switch_c_p_2_10",
+          "gateway_status": "sensor.adp_cn_976148245_adgw_status_c_p_2_11"
+        },
+        {
+          "key": "dining_room",
+          "name": "Dining Room",
+          "critical": false,
+          "temp_sensor": "sensor.xiaomi_cn_860672267_ua3_temperature_p_3_7",
+          "cooling_active": "input_boolean.dining_room_hvac_cooling_active",
+          "cooldown_timer": "timer.dining_room_hvac_cooldown",
+          "off_cooldown_timer": "timer.dining_room_hvac_off_cooldown",
+          "gateway_switch": "switch.adp_cn_975356665_adgw_switch_a_p_2_2",
+          "gateway_status": "sensor.adp_cn_975356665_adgw_status_a_p_2_3"
+        },
+        {
+          "key": "living_room",
+          "name": "Living Room",
+          "critical": false,
+          "temp_sensor": "sensor.living_room_temperature",
+          "cooling_active": "input_boolean.living_room_hvac_cooling_active",
+          "cooldown_timer": "timer.living_room_hvac_cooldown",
+          "off_cooldown_timer": "timer.living_room_hvac_off_cooldown",
+          "gateway_switch": "switch.adp_cn_975356665_adgw_switch_b_p_2_6",
+          "gateway_status": "sensor.adp_cn_975356665_adgw_status_b_p_2_7"
+        }
+      ]
+    },
+    "mode": "restart",
+    "max_exceeded": "silent"
+  }
+]

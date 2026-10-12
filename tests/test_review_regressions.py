@@ -44,6 +44,10 @@ async def test_manual_correction_during_feedback_is_not_overwritten(rig):
 
 @pytest.mark.asyncio
 async def test_actual_reload_cannot_reuse_old_ready_record(rig):
+    # Keep the old instance out of demand while file I/O/reload yields. A timer
+    # tick may legitimately run it before reload disables it. Test stale trust
+    # under demand only after the replacement has loaded.
+    await rig.set("sensor.temperature", 21.4)
     config = expand("hvac_guarded_thermostat.yaml") | {
         "id": "test_0", "alias": "Test 0", "initial_state": False,
     }
@@ -53,11 +57,14 @@ async def test_actual_reload_cannot_reuse_old_ready_record(rig):
     await rig.call("automation", "turn_on", {"entity_id": "automation.test_0"})
     await rig.trust("off")
     assert rig.record["phase"] == "ready"
+    await rig.tick()
+    assert not rig.presses  # A pre-reload timer cannot consume the test demand.
     config["alias"] = "Test 0 reloaded"
     Path(rig.hass.config.path("configuration.yaml")).write_text(json.dumps({"automation": [config]}))
     await rig.call("automation", "reload", {})
     assert rig.hass.states.get("automation.test_0").state == "off"
     after_reload = rig.record.copy()
+    await rig.set("sensor.temperature", 22)  # Demand while replacement is disabled.
     await rig.call("automation", "turn_on", {"entity_id": "automation.test_0"})
     await rig.tick()
     assert not rig.presses, {"after_reload": after_reload, "current": rig.record}

@@ -88,11 +88,14 @@ class RoomsRig:
 
 
 @pytest_asyncio.fixture
-async def rooms_rig(tmp_path):
+async def rooms_rig(tmp_path, request):
     hass = HomeAssistant(str(tmp_path)); loader.async_setup(hass); hass.config.skip_pip = True
     hass.config_entries = config_entries.ConfigEntries(hass,{})
     assert await async_load_base_functionality(hass)
     candidates, helpers, lifecycle = build_controllers(BASE)
+    transform = getattr(request, "param", None)
+    if transform is not None:
+        candidates = transform(candidates)
     by_id={x["id"]:x for x in candidates}
     inputs={room:by_id[info["id"]]["use_blueprint"]["input"] for room,info in ROOMS.items()}
     with time_machine.travel(datetime(2026,10,12,7,0,tzinfo=UTC),tick=False) as clock:

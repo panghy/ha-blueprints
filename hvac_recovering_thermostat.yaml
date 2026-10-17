@@ -17,11 +17,14 @@ blueprint:
     a pending ON, without another toggle. For ZHA, a matching unattributed
     switch report within 90 seconds is booked as a late acknowledgement.
     An acknowledgement proves only that the Fingerbot received the command,
-    not that it pressed the button: if, 30 minutes after an acknowledged ON,
-    the room is at least 0.1°C warmer than at the press, the estimate becomes
-    OFF (`not_cooling`) and, while cooling is still needed, the toggle is
-    pressed once more. Replayed over 12–17 Oct 2026 this fired only on the
-    dining room's failed presses; slow night-time cooling never triggered it.
+    not that it pressed the button: if the room is at least 0.1°C warmer than
+    at an acknowledged ON for 10 consecutive minutes, starting 30–45 minutes
+    after the press, the estimate becomes OFF (`not_cooling`) and, while
+    cooling is still needed, the toggle is pressed once more. The bounded
+    window keeps a working AC that later falls behind (sun, capacity) from
+    being second-guessed; the 10-minute hold rides out sensor source jumps.
+    Replayed over 12–17 Oct 2026 this fired only on the dining room's failed
+    presses; slow night-time cooling never triggered it.
     Correct an idle estimate when sustained temperature drift contradicts it.
 
     This is an explicitly selected availability tradeoff. Feedback has no
@@ -385,13 +388,29 @@ actions:
     value_template: "{{ record.get('v') == 2 and record.get('phase') in ['ready', 'pending'] }}"
   - variables:
       low: "{{ record.get('lo') | float(record.t) if record.phase == 'pending' else record.t }}"
-      not_cooling: >-
+      # Acknowledged ON that never cooled: warmer than at the press, held for
+      # 10 minutes, first seen 30–45 minutes after the press.
+      warm_check: >-
         {{ record.phase == 'ready' and record.expected == 'on' and not packet
            and record.get('reason') in ['zigbee_ack', 'zigbee_late_ack', 'feedback']
-           and is_state(cooldown_id, 'idle')
-           and clock - record.booked >= 1800 and clock - record.issued >= 1800
-           and as_timestamp(states[raw_temp_id].last_reported) > record.booked
-           and (temperature - record.t) | round(1) >= 0.1 }}
+           and 1800 <= clock - record.booked <= 3300 and clock - record.issued >= 1800
+           and as_timestamp(states[raw_temp_id].last_reported) > record.booked }}
+      warm: "{{ (temperature - record.t) | round(1) >= 0.1 }}"
+      warm_since: "{{ record.get('w') | float(0) if record.phase == 'ready' else 0 }}"
+  - if: >-
+      {{ warm_check and ((warm and warm_since <= 0 and clock - record.booked <= 2700)
+                         or (not warm and warm_since > 0)) }}
+    then:
+      - action: input_text.set_value
+        target:
+          entity_id: !input command_record
+        data:
+          value: "{{ dict(record, w=(clock | round(0) if warm else 0)) | to_json }}"
+      - stop: Not-cooling observation updated; reevaluate on the next reading
+  - variables:
+      not_cooling: >-
+        {{ warm_check and warm and warm_since > 0 and clock - warm_since >= 600
+           and is_state(cooldown_id, 'idle') }}
       high: "{{ record.get('hi') | float(record.t) if record.phase == 'pending' else record.t }}"
       # A ZHA call can time out after the device has already pressed; its later
       # report has no automation context. Accept only the expected edge, soon.

@@ -127,6 +127,9 @@ async def test_tuned_failed_command_keeps_thirteen_minute_floor_and_room_isolati
     await r.advance(779)
     await r.tick()
     assert r.presses.count(failed) == 1
+    study = r.record("study")
+    await r.set(r.configs["study"]["temp_sensor"],
+                round(study["t"] + (0.5 if study["expected"] == "on" else -0.6), 1))
     r.fail.clear()
     await r.advance(1)
     await r.tick()

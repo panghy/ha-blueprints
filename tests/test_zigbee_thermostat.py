@@ -42,6 +42,7 @@ async def test_failed_call_stays_pending_and_retries_after_full_floor(rig, desir
     await rig.set("sensor.feedback", "0500010154000300")
     assert rig.record["phase"] == "pending"  # Old gateway cannot acknowledge ZHA.
     await rig.advance(779)
+    await rig.evidence()
     await rig.tick()
     assert len(rig.presses) == 1
     rig.fail_press = False
@@ -96,6 +97,7 @@ async def test_reload_preserves_ambiguous_command_age(rig, tmp_path, desired):
     assert rig.record["issued"] == before["issued"]
     assert rig.record["booked"] == before["booked"]
     await rig.advance(679)
+    await rig.evidence()
     await rig.tick()
     assert len(rig.presses) == 1
     rig.fail_press = False
@@ -140,6 +142,12 @@ async def test_correction_during_successful_call_is_not_overwritten(rig, change)
     await rig.set("sensor.temperature", 22.3)
     assert len(rig.presses) == 1
     assert rig.record.get("reason") != "zigbee_ack"
+    if change == "lifecycle":
+        # The run lost ownership, but the device reported the expected toggle
+        # edge: book that press so a timeout can never repeat it.
+        assert rig.record["reason"] == "zigbee_late_ack"
+        assert rig.hass.states.get("input_boolean.cooling").state == "on"
+        return
     assert rig.hass.states.get("input_boolean.cooling").state == "off"
     if change == "snapshot":
         assert rig.hass.states.get("input_number.snapshot").state == "20.0"
@@ -155,6 +163,12 @@ async def test_silently_skipped_or_unowned_state_change_cannot_acknowledge(rig, 
     rig.hass.services.async_register("switch", "toggle", skipped)
     await rig.set("sensor.temperature", 22.3)
     assert len(rig.presses) == 1
+    if result == "foreign_context":
+        # 17 Oct 2026: an unattributed report of the expected edge is the
+        # device's late acknowledgement of this press, not a reason to retry.
+        assert rig.record["phase"] == "ready"
+        assert rig.record["reason"] == "zigbee_late_ack"
+        return
     assert rig.record["phase"] == "pending"
     assert rig.hass.states.get("input_boolean.cooling").state == "off"
 

@@ -66,6 +66,7 @@ async def test_tuned_failed_commands_still_wait_thirteen_minutes(rig, desired):
         await rig.tick()
         assert len(rig.presses) == 1
         assert rig.record["phase"] == "pending"
+    await rig.evidence()
     rig.fail_press = False
     await rig.advance(1)
     await rig.tick()

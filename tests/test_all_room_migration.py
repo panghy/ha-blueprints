@@ -155,6 +155,7 @@ async def test_one_failed_room_does_not_block_others_or_retry_early(rooms_rig):
     assert r.record("study")["phase"]=="pending"
     assert all(r.record(room)["reason"]=="zigbee_ack" for room in ROOMS if room!="study")
     await r.advance(779);await r.tick();assert r.presses.count(failed)==1
+    study=r.record("study");await r.set(r.configs["study"]["temp_sensor"],round(study["t"]+(0.5 if study["expected"]=="on" else -0.6),1))
     r.fail.clear();await r.advance(1);await r.tick()
     assert r.presses.count(failed)==2 and r.record("study")["reason"]=="zigbee_ack"
 

@@ -2,11 +2,21 @@ blueprint:
   name: HVAC Recovering Toggle Thermostat
   description: >-
     Opt-in single-writer thermostat with automatic lost-command recovery.
-    Missing feedback never requires a physical reset: after at least 13 minutes,
-    reassess temperature and retry only while the requested change is still
-    needed. A falling room can confirm a pending ON estimate; a warming room
-    can confirm a pending OFF estimate without another power toggle. Correct
-    an idle estimate when sustained temperature drift contradicts it.
+    Missing feedback never requires a physical reset. Every command is one
+    toggle press, so an unconfirmed press is never repeated on timeout alone:
+    after at least 13 minutes it is retried only while the requested change is
+    still needed AND temperature shows it did not happen (OFF: still falling,
+    at least `retry_fall_evidence` below the command temperature; ON: still
+    rising at least 0.5°C above it, or not cooler than it after 30 minutes).
+    A command still unconfirmed after 60 minutes, while the room still needs
+    the change, is retried: a working press shows its temperature response
+    well within that time, so a pending command can never stall indefinitely.
+    Working commands in this house showed up to 0.5°C residual cooling after
+    OFF and up to 0.4°C start-up warming after ON (12–17 Oct 2026). A rebound from the post-command
+    low confirms a pending OFF and a fall from the post-command peak confirms
+    a pending ON, without another toggle. For ZHA, a matching unattributed
+    switch report within 90 seconds is booked as a late acknowledgement.
+    Correct an idle estimate when sustained temperature drift contradicts it.
 
     This is an explicitly selected availability tradeoff. Feedback has no
     command identifier; late execution, lost feedback and ambient temperature
@@ -148,6 +158,19 @@ blueprint:
           min: -2
           max: 2
           step: 0.1
+    retry_fall_evidence:
+      name: OFF retry evidence (continued fall)
+      description: >-
+        An unconfirmed OFF is pressed again only once the room is still at its
+        lowest point and at least this far below the command temperature.
+        Keep it above the room's normal residual cooling after a real OFF.
+      default: 0.6
+      selector:
+        number:
+          min: 0.3
+          max: 2
+          step: 0.1
+          unit_of_measurement: °C
     alert_notify_service:
       name: Existing standard notification service
       description: Compatibility input; this controller sends no lockout notices. Temperature/drift alerts stay separate.
@@ -177,6 +200,7 @@ variables:
   upper: !input upper_offset
   lower: !input lower_offset
   zha_min_off: !input zha_min_off_minutes
+  fall_evidence: !input retry_fall_evidence
   notify_service: !input alert_notify_service
 
 triggers:
@@ -330,17 +354,58 @@ actions:
         data:
           value: "{{ dict(record, generation=generation) | to_json }}"
       - stop: Lifecycle updated; reevaluate automatically
+  # Track the post-command temperature extremes of an unconfirmed press. Retry
+  # and confirmation compare against them, not only the command temperature.
+  - variables:
+      low: >-
+        {{ ([record.get('lo') | float(record.t), record.t, temperature] | min) | round(2)
+           if record.phase == 'pending' else record.t }}
+      high: >-
+        {{ ([record.get('hi') | float(record.t), record.t, temperature] | max) | round(2)
+           if record.phase == 'pending' else record.t }}
+      tracked: "{{ dict(record, lo=low, hi=high) | to_json }}"
+  - if: >-
+      {{ record.phase == 'pending' and tracked | length <= 255
+         and (record.get('lo') != low or record.get('hi') != high) }}
+    then:
+      - action: input_text.set_value
+        target:
+          entity_id: !input command_record
+        data:
+          value: "{{ tracked }}"
+  - variables:
+      record: "{{ states(journal_id) | from_json({}) }}"
+  - condition: template
+    value_template: "{{ record.get('v') == 2 and record.get('phase') in ['ready', 'pending'] }}"
+  - variables:
+      low: "{{ record.get('lo') | float(record.t) if record.phase == 'pending' else record.t }}"
+      high: "{{ record.get('hi') | float(record.t) if record.phase == 'pending' else record.t }}"
+      # A ZHA call can time out after the device has already pressed; its later
+      # report has no automation context. Accept only the expected edge, soon.
+      late_ack: >-
+        {{ transport == 'zha_click' and kind == 'switch' and record.phase == 'pending'
+           and is_state(fingerbot_mode_id, 'CLICK')
+           and record.get('sw') in ['on', 'off']
+           and trigger.to_state is not none and trigger.from_state is not none
+           and trigger.from_state.state in ['on', 'off']
+           and trigger.to_state.state == record.sw
+           and trigger.from_state.state != record.sw
+           and 0 <= as_timestamp(trigger.to_state.last_changed) - record.issued <= 90 }}
   - variables:
       booking: >-
         {% if record.phase == 'pending' and packet
            and record.issued <= as_timestamp(trigger.to_state.last_changed) %}
           {{ record.expected }}
+        {% elif late_ack %}
+          {{ record.expected }}
         {% elif not packet and is_state(cooldown_id, 'idle')
            and clock - record.issued >= 780 and clock - record.booked >= 780 %}
           {% if record.phase == 'pending'
              and as_timestamp(states[raw_temp_id].last_reported) > record.issued %}
-            {% if record.expected == 'on' and (record.t - temperature) | round(1) >= 0.4 %}on
-            {% elif record.expected == 'off' and (temperature - record.t) | round(1) >= 0.2 %}off
+            {% if record.expected == 'on' and ((record.t - temperature) | round(1) >= 0.4
+                 or (high - temperature) | round(1) >= 0.4) %}on
+            {% elif record.expected == 'off' and ((temperature - record.t) | round(1) >= 0.2
+                 or (temperature - low) | round(1) >= 0.2) %}off
             {% else %}{{ '' }}{% endif %}
           {% elif record.phase == 'ready' %}
             {% if record.expected == 'on' and (temperature - record.t) | round(1) >= 0.4 %}off
@@ -349,7 +414,7 @@ actions:
           {% else %}{{ '' }}{% endif %}
         {% else %}{{ '' }}{% endif %}
   - variables:
-      booking_reason: "{{ 'feedback' if packet else 'temperature' }}"
+      booking_reason: "{{ 'feedback' if packet else 'zigbee_late_ack' if late_ack else 'temperature' }}"
   - if: "{{ booking | trim in ['on', 'off'] }}"
     then: &book_estimate
       - variables:
@@ -417,10 +482,18 @@ actions:
   - variables:
       desired: >-
         {% if record.phase == 'pending' %}
-          {% if clock - record.issued >= 780 and is_state(cooldown_id, 'idle')
+          {% set age = clock - record.issued %}
+          {% if age >= 780 and is_state(cooldown_id, 'idle')
              and is_state(off_cooldown_id, 'idle')
-             and ((record.expected == 'on' and temperature > target + upper)
-               or (record.expected == 'off' and temperature < target - lower)) %}
+             and as_timestamp(states[raw_temp_id].last_reported) > record.issued
+             and ((record.expected == 'on' and temperature > target + upper
+                   and (((temperature - record.t) | round(1) >= 0.5 and (high - temperature) | round(1) <= 0)
+                     or (age >= 1800 and (record.t - temperature) | round(1) < 0.2)
+                     or age >= 3600))
+               or (record.expected == 'off' and temperature < target - lower
+                   and (((record.t - temperature) | round(1) >= fall_evidence | float(0.6)
+                         and (temperature - low) | round(1) <= 0)
+                     or age >= 3600))) %}
             {{ record.expected }}
           {% else %}{{ '' }}{% endif %}
         {% elif record.expected == 'off' and temperature > target + upper
@@ -436,6 +509,7 @@ actions:
   - variables:
       issued_at: "{{ as_timestamp(now()) }}"
       belief_before: "{{ states(belief_id) }}"
+      switch_after: "{{ 'off' if is_state(switch_id, 'on') else 'on' }}"
   - action: input_text.set_value
     target:
       entity_id: !input command_record
@@ -443,7 +517,8 @@ actions:
       value: >-
         {{ {'v': 2, 'phase': 'pending', 'expected': desired | trim,
             'issued': issued_at, 'booked': record.booked,
-            't': temperature, 'generation': generation,
+            't': temperature, 'lo': temperature, 'hi': temperature, 'sw': switch_after,
+            'generation': generation,
             'reason': 'retry' if record.phase == 'pending' else 'command'} | to_json }}
   # Arm the cycle timers before the physical service. The journal separately
   # enforces the full 13-minute retry/reconciliation floor for uncertain calls,
@@ -471,6 +546,7 @@ actions:
       {% set j = states(journal_id) | from_json({}) %}
       {{ j is mapping and j.get('phase') == 'pending'
          and j.get('issued') == issued_at and j.get('expected') == desired | trim
+         and j.get('sw') == switch_after and states(switch_id) == ('on' if switch_after == 'off' else 'off')
          and j.get('generation') == generation and states(lifecycle_id) == generation
          and is_state(controller_id, 'on')
          and as_timestamp(states[controller_id].last_changed) == activation
@@ -488,7 +564,6 @@ actions:
            or (desired | trim == 'off' and states(temp_id) | float < states(target_id) | float - lower)) }}
   - variables:
       pending_before: "{{ states(journal_id) | from_json({}) }}"
-      switch_after: "{{ 'off' if is_state(switch_id, 'on') else 'on' }}"
   # The ZHA switch implementation awaits the cluster SUCCESS response and raises
   # on failure. Do not continue_on_error: an uncertain call must remain pending.
   - action: switch.toggle

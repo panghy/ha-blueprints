@@ -80,6 +80,13 @@ class Rig:
             self.hass.bus.async_fire("timer.finished", {"entity_id": entity})
         await self.settle()
 
+    async def evidence(self, entity="sensor.temperature", record=None):
+        # Fresh temperature showing an unconfirmed press did not take effect:
+        # OFF still falling 0.6°C below command temperature, ON still rising.
+        record = record or self.record
+        delta = 0.5 if record["expected"] == "on" else -0.6
+        await self.set(entity, round(record["t"] + delta, 1))
+
     @property
     def record(self):
         return json.loads(self.hass.states.get("input_text.command").state)

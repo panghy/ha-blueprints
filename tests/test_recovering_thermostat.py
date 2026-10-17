@@ -18,6 +18,7 @@ async def pending(rig, desired="off"):
 async def test_missing_feedback_retries_without_a_physical_reset(rig, desired):
     await pending(rig, desired)
     await rig.advance(779)
+    await rig.evidence()
     await rig.tick()
     assert len(rig.presses) == 1
     await rig.advance(1)
@@ -32,7 +33,7 @@ async def test_repeated_losses_keep_recovering_at_the_protection_floor(rig, desi
     await pending(rig, desired)
     for count in range(2, 5):
         await rig.advance(780)
-        await rig.set("sensor.temperature", 22.3 if desired == "on" else 21.3)
+        await rig.evidence()
         await rig.tick()
         assert len(rig.presses) == count
     assert all((b[0] - a[0]).total_seconds() >= 780
@@ -97,6 +98,7 @@ async def test_temporary_unavailability_recovers_without_manual_reset(rig, entit
     await rig.tick()
     assert len(rig.presses) == 1
     await rig.set(entity, restored)
+    await rig.evidence()
     await rig.tick()
     assert len(rig.presses) == 2
     assert rig.record["phase"] == "pending"
@@ -108,7 +110,7 @@ async def test_stale_temperature_holds_then_recovers_on_a_fresh_report(rig):
     await rig.advance(2101)
     await rig.tick()
     assert len(rig.presses) == 1
-    await rig.set("sensor.temperature", 21.3)
+    await rig.evidence()
     await rig.tick()
     assert len(rig.presses) == 2
 
@@ -126,6 +128,7 @@ async def test_transport_error_retains_protection_but_allows_a_later_retry(rig):
     rig.fail_press = True
     await pending(rig)
     await rig.advance(779)
+    await rig.evidence()
     await rig.tick()
     assert len(rig.presses) == 1
     rig.fail_press = False
@@ -151,6 +154,7 @@ async def test_disabled_controller_stays_disabled_until_user_enables_it(rig):
     await pending(rig)
     await rig.call("automation", "turn_off", {"entity_id": "automation.test_0", "stop_actions": True})
     await rig.advance(800)
+    await rig.evidence()
     await rig.tick()
     assert len(rig.presses) == 1
     await rig.call("automation", "turn_on", {"entity_id": "automation.test_0"})
@@ -172,6 +176,7 @@ async def test_actual_changed_config_reload_retains_pending_age_and_auto_recover
     assert rig.record["phase"] == "pending"
     assert len(rig.presses) == 1
     await rig.advance(780)
+    await rig.evidence()
     await rig.tick()
     assert len(rig.presses) == 2
 
@@ -287,6 +292,7 @@ async def test_input_changes_during_timer_preparation_prevent_actuation(rig, fai
 async def test_retry_then_double_delivery_can_reconcile_and_recover(rig):
     await pending(rig, "on")
     await rig.advance(780)
+    await rig.evidence()
     await rig.tick()
     assert len(rig.presses) == 2
     # Both delayed toggles land: AC is actually OFF, first feedback estimates ON.
@@ -297,12 +303,12 @@ async def test_retry_then_double_delivery_can_reconcile_and_recover(rig):
     await rig.set("sensor.feedback", "0500010154000300")
     await rig.set("sensor.feedback", "01")
     await rig.advance(780)
-    await rig.set("sensor.temperature", 22.7)
+    await rig.set("sensor.temperature", 23.2)  # Retry was booked at 22.8.
     await rig.tick()
     assert rig.record["expected"] == "off"
     assert rig.record["reason"] == "temperature"
     await rig.advance(780)
-    await rig.set("sensor.temperature", 22.8)
+    await rig.set("sensor.temperature", 23.3)
     await rig.tick()
     assert len(rig.presses) == 3
     await rig.set("sensor.feedback", "0500010154000300")
@@ -333,6 +339,7 @@ async def test_actual_handoff_from_guard_preserves_pending_intent_and_command_ag
     assert rig.record["booked"] == old["booked"]
     assert len(rig.presses) == 1
     await rig.advance(679)
+    await rig.evidence()
     await rig.tick()
     assert len(rig.presses) == 1
     await rig.advance(1)

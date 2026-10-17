@@ -16,6 +16,12 @@ blueprint:
     low confirms a pending OFF and a fall from the post-command peak confirms
     a pending ON, without another toggle. For ZHA, a matching unattributed
     switch report within 90 seconds is booked as a late acknowledgement.
+    An acknowledgement proves only that the Fingerbot received the command,
+    not that it pressed the button: if, 30 minutes after an acknowledged ON,
+    the room is at least 0.1°C warmer than at the press, the estimate becomes
+    OFF (`not_cooling`) and, while cooling is still needed, the toggle is
+    pressed once more. Replayed over 12–17 Oct 2026 this fired only on the
+    dining room's failed presses; slow night-time cooling never triggered it.
     Correct an idle estimate when sustained temperature drift contradicts it.
 
     This is an explicitly selected availability tradeoff. Feedback has no
@@ -379,6 +385,13 @@ actions:
     value_template: "{{ record.get('v') == 2 and record.get('phase') in ['ready', 'pending'] }}"
   - variables:
       low: "{{ record.get('lo') | float(record.t) if record.phase == 'pending' else record.t }}"
+      not_cooling: >-
+        {{ record.phase == 'ready' and record.expected == 'on' and not packet
+           and record.get('reason') in ['zigbee_ack', 'zigbee_late_ack', 'feedback']
+           and is_state(cooldown_id, 'idle')
+           and clock - record.booked >= 1800 and clock - record.issued >= 1800
+           and as_timestamp(states[raw_temp_id].last_reported) > record.booked
+           and (temperature - record.t) | round(1) >= 0.1 }}
       high: "{{ record.get('hi') | float(record.t) if record.phase == 'pending' else record.t }}"
       # A ZHA call can time out after the device has already pressed; its later
       # report has no automation context. Accept only the expected edge, soon.
@@ -398,6 +411,7 @@ actions:
           {{ record.expected }}
         {% elif late_ack %}
           {{ record.expected }}
+        {% elif not_cooling %}off
         {% elif not packet and is_state(cooldown_id, 'idle')
            and clock - record.issued >= 780 and clock - record.booked >= 780 %}
           {% if record.phase == 'pending'
@@ -414,7 +428,9 @@ actions:
           {% else %}{{ '' }}{% endif %}
         {% else %}{{ '' }}{% endif %}
   - variables:
-      booking_reason: "{{ 'feedback' if packet else 'zigbee_late_ack' if late_ack else 'temperature' }}"
+      booking_reason: >-
+        {{ 'feedback' if packet else 'zigbee_late_ack' if late_ack
+           else 'not_cooling' if not_cooling else 'temperature' }}
   - if: "{{ booking | trim in ['on', 'off'] }}"
     then: &book_estimate
       - variables:
@@ -479,6 +495,9 @@ actions:
            or (transport == 'zha_click' and is_state(fingerbot_mode_id, 'CLICK'))) and states(switch_id) in ['on', 'off'] }}
   - variables:
       off_wait: "{{ restart_seconds if transport == 'zha_click' and record.get('reason') == 'zigbee_ack' else 780 }}"
+      # not_cooling follows 30+ minutes without cooling after the last press,
+      # so the restart press needs only the normal floor from that press.
+      booked_wait: "{{ 0 if record.get('reason') == 'not_cooling' else off_wait }}"
   - variables:
       desired: >-
         {% if record.phase == 'pending' %}
@@ -498,7 +517,7 @@ actions:
           {% else %}{{ '' }}{% endif %}
         {% elif record.expected == 'off' and temperature > target + upper
            and is_state(cooldown_id, 'idle')
-           and clock - record.booked >= off_wait and clock - record.issued >= off_wait %}on
+           and clock - record.booked >= booked_wait and clock - record.issued >= off_wait %}on
         {% elif record.expected == 'on' and temperature < target - lower
            and is_state(off_cooldown_id, 'idle')
            and clock - record.booked >= (780 if record.get('reason') == 'estimate_adopted' else 300)

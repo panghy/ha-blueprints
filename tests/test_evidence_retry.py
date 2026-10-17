@@ -127,13 +127,59 @@ async def test_flat_room_after_unacknowledged_on_retries_only_after_thirty_minut
     assert len(rig.presses) == 2
 
 
-async def test_brief_cooling_blocks_the_thirty_minute_on_fallback(rig):
+async def test_thirty_minute_on_fallback_uses_current_temperature(rig):
+    # Review of PR #24: a brief dip must not disable the fallback for good.
     await unacknowledged(rig, "on")
-    await walk(rig, 22.1, 22.3)
-    await rig.advance(1800)
+    await walk(rig, 22.1, 22.5, 22.7)
+    await rig.advance(1799 - 180)
     await rig.tick()
     assert len(rig.presses) == 1
-    assert rig.record["phase"] == "pending"
+    await rig.advance(1)
+    await rig.tick()
+    assert len(rig.presses) == 2
+
+
+async def test_partial_cooling_waits_then_retries_at_sixty_minutes(rig):
+    await unacknowledged(rig, "on")
+    await walk(rig, 22.1)
+    await rig.advance(1800)
+    await rig.set("sensor.temperature", 22.1)
+    await rig.tick()
+    assert len(rig.presses) == 1
+    await rig.advance(3599 - 1800 - 60)
+    await rig.set("sensor.temperature", 22.1)
+    await rig.tick()
+    assert len(rig.presses) == 1
+    await rig.advance(1)
+    await rig.tick()
+    assert len(rig.presses) == 2
+    assert rig.record["expected"] == "on"
+
+
+async def test_unconfirmed_off_on_a_cold_plateau_retries_at_sixty_minutes(rig):
+    # AC still running at its own setpoint: no rebound, no further fall.
+    await unacknowledged(rig, "off")
+    await walk(rig, 21.0, 20.8)
+    for _ in range(3):
+        await rig.advance(900)
+        await rig.set("sensor.temperature", 20.8)
+        await rig.tick()
+    assert len(rig.presses) == 1
+    await rig.advance(3599 - 120 - 2700)
+    await rig.tick()
+    assert len(rig.presses) == 1
+    await rig.advance(1)
+    await rig.tick()
+    assert len(rig.presses) == 2
+    assert rig.record["expected"] == "off"
+
+
+async def test_sixty_minute_fallback_never_overrides_a_satisfied_band(rig):
+    await unacknowledged(rig, "on")
+    await walk(rig, 22.1, 21.6)  # Cooled below the ON threshold; not needed.
+    await rig.advance(3600)
+    await rig.tick()
+    assert len(rig.presses) == 1
 
 
 async def test_fall_from_post_command_peak_confirms_on_without_a_second_press(rig):

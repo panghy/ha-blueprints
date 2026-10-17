@@ -70,9 +70,9 @@ for (const row of history) {
       ns.presses = (ns.presses || 0) + 1;
       if (rec.reason === "retry") ns.retries = (ns.retries || 0) + 1;
       msgs.push("automatic " + direction + (rec.reason === "retry" ? " retry" : " command") + " recorded " + hk(rec.issued * 1000) + "; awaiting feedback or temperature evidence; physical actuation unconfirmed");
-    } else if (rec.phase === "ready" && ["feedback", "zigbee_ack"].includes(rec.reason) && rec.issued > 0 && rec.booked >= rec.issued) {
+    } else if (rec.phase === "ready" && ["feedback", "zigbee_ack", "zigbee_late_ack"].includes(rec.reason) && rec.issued > 0 && rec.booked >= rec.issued) {
       ackedLagMin = (rec.booked - rec.issued) / 60;
-      msgs.push(direction + (rec.reason === "zigbee_ack" ? " Zigbee command acknowledged " : " feedback booked ") + hk(rec.booked * 1000) + " (" + ackedLagMin.toFixed(1) + " min after command); physical timing unconfirmed");
+      msgs.push(direction + (rec.reason === "zigbee_ack" ? " Zigbee command acknowledged " : rec.reason === "zigbee_late_ack" ? " late Zigbee report booked " : " feedback booked ") + hk(rec.booked * 1000) + " (" + ackedLagMin.toFixed(1) + " min after command); physical timing unconfirmed");
     } else if (rec.phase === "ready" && rec.reason === "temperature") {
       msgs.push("temperature-based " + direction + " estimate recorded " + hk(rec.booked * 1000) + "; physical state unconfirmed");
     } else if (rec.phase === "ready" && rec.reason === "estimate_adopted") {

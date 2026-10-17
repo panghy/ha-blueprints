@@ -47,3 +47,9 @@ test('legacy feedback remains distinguishable from Zigbee acknowledgement',async
   const d=data();d.journal=row(JSON.stringify({...record,reason:'feedback'}));
   const r=await evaluate(d);assert.match(r.message,/feedback booked/);assert.ok(!r.message.includes('Zigbee command acknowledged'));
 });
+test('late Zigbee report booking is reported without claiming physical state',async()=>{
+  const d=data();d.journal=row(JSON.stringify({...record,reason:'zigbee_late_ack'}));
+  const r=await evaluate(d);
+  assert.match(r.message,/late Zigbee report booked/);
+  assert.match(r.message,/physical timing unconfirmed/);
+});

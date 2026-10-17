@@ -7,7 +7,10 @@ blueprint:
     after at least 13 minutes it is retried only while the requested change is
     still needed AND temperature shows it did not happen (OFF: still falling,
     at least `retry_fall_evidence` below the command temperature; ON: still
-    rising at least 0.5°C above it, or no cooling at all after 30 minutes).
+    rising at least 0.5°C above it, or not cooler than it after 30 minutes).
+    A command still unconfirmed after 60 minutes, while the room still needs
+    the change, is retried: a working press shows its temperature response
+    well within that time, so a pending command can never stall indefinitely.
     Working commands in this house showed up to 0.5°C residual cooling after
     OFF and up to 0.4°C start-up warming after ON (12–17 Oct 2026). A rebound from the post-command
     low confirms a pending OFF and a fall from the post-command peak confirms
@@ -485,10 +488,12 @@ actions:
              and as_timestamp(states[raw_temp_id].last_reported) > record.issued
              and ((record.expected == 'on' and temperature > target + upper
                    and (((temperature - record.t) | round(1) >= 0.5 and (high - temperature) | round(1) <= 0)
-                     or (age >= 1800 and (record.t - low) | round(1) < 0.2)))
+                     or (age >= 1800 and (record.t - temperature) | round(1) < 0.2)
+                     or age >= 3600))
                or (record.expected == 'off' and temperature < target - lower
-                   and (record.t - temperature) | round(1) >= fall_evidence | float(0.6)
-                   and (temperature - low) | round(1) <= 0)) %}
+                   and (((record.t - temperature) | round(1) >= fall_evidence | float(0.6)
+                         and (temperature - low) | round(1) <= 0)
+                     or age >= 3600))) %}
             {{ record.expected }}
           {% else %}{{ '' }}{% endif %}
         {% elif record.expected == 'off' and temperature > target + upper

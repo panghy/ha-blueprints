@@ -25,6 +25,11 @@ blueprint:
     being second-guessed; the 10-minute hold rides out sensor source jumps.
     Replayed over 12–17 Oct 2026 this fired only on the dining room's failed
     presses; slow night-time cooling never triggered it.
+    For ZHA, an unconfirmed ON whose switch has not changed at all since the
+    command (the Fingerbot never responded, so no press happened) is retried
+    at the 13-minute floor while cooling is needed and the room is no cooler
+    than at the command. A believed ON is re-estimated OFF from warming only
+    from 17 minutes after the press, so a slow-starting AC is not misread.
     Correct an idle estimate when sustained temperature drift contradicts it.
 
     This is an explicitly selected availability tradeoff. Feedback has no
@@ -441,7 +446,9 @@ actions:
                  or (temperature - low) | round(1) >= 0.2) %}off
             {% else %}{{ '' }}{% endif %}
           {% elif record.phase == 'ready' %}
-            {% if record.expected == 'on' and (temperature - record.t) | round(1) >= 0.4 %}off
+            {% if record.expected == 'on' and clock - record.issued >= 1020
+                 and clock - record.booked >= 1020
+                 and (temperature - record.t) | round(1) >= 0.4 %}off
             {% elif record.expected == 'off' and (record.t - temperature) | round(1) >= 1.0 %}on
             {% else %}{{ '' }}{% endif %}
           {% else %}{{ '' }}{% endif %}
@@ -513,6 +520,13 @@ actions:
          and ((transport == 'xiaomi_ble' and is_state(status_id, '01'))
            or (transport == 'zha_click' and is_state(fingerbot_mode_id, 'CLICK'))) and states(switch_id) in ['on', 'off'] }}
   - variables:
+      # The Fingerbot never reported any change after this command: no press
+      # happened, so retrying cannot undo a landed press.
+      no_response: >-
+        {{ transport == 'zha_click' and record.phase == 'pending'
+           and record.get('sw') in ['on', 'off'] and states(switch_id) in ['on', 'off']
+           and states(switch_id) != record.sw
+           and as_timestamp(states[switch_id].last_changed, 0) < record.issued }}
       off_wait: "{{ restart_seconds if transport == 'zha_click' and record.get('reason') == 'zigbee_ack' else 780 }}"
       # not_cooling follows 30+ minutes without cooling after the last press,
       # so the restart press needs only the normal floor from that press.
@@ -526,6 +540,7 @@ actions:
              and as_timestamp(states[raw_temp_id].last_reported) > record.issued
              and ((record.expected == 'on' and temperature > target + upper
                    and (((temperature - record.t) | round(1) >= 0.5 and (high - temperature) | round(1) <= 0)
+                     or (no_response and (record.t - temperature) | round(1) < 0.1)
                      or (age >= 1800 and (record.t - temperature) | round(1) < 0.2)
                      or age >= 3600))
                or (record.expected == 'off' and temperature < target - lower

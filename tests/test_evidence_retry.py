@@ -25,8 +25,13 @@ async def install(rig, **extra):
     await rig.settle()
 
 
-async def unacknowledged(rig, desired):
-    """Issue one command whose radio call fails, leaving the outcome unknown."""
+async def unacknowledged(rig, desired, responded=True):
+    """Issue one command whose radio call fails, leaving the outcome unknown.
+
+    responded=True: the Fingerbot reported activity after the command (here a
+    brief unavailable/restore), so the press may have landed. responded=False:
+    no change at all — the device never responded.
+    """
     await install(rig)
     await rig.trust("on" if desired == "off" else "off")
     rig.fail_press = True
@@ -35,6 +40,11 @@ async def unacknowledged(rig, desired):
     assert rig.record["phase"] == "pending"
     assert rig.record["expected"] == desired
     rig.fail_press = False
+    if responded:
+        before = rig.hass.states.get("switch.fingerbot").state
+        await rig.set("switch.fingerbot", "unavailable")
+        await rig.set("switch.fingerbot", before)
+        assert rig.record["phase"] == "pending"
 
 
 async def walk(rig, *temperatures, step=60):
@@ -280,3 +290,53 @@ async def test_pending_journal_stays_within_input_text_limit(rig):
     await walk(rig, 21.25, 20.123456)
     assert rig.record["phase"] == "pending"
     assert len(rig.hass.states.get("input_text.command").state) <= 255
+
+
+async def test_no_response_on_is_retried_at_the_floor(rig):
+    # 18 Oct 10:34 dining: ON sent, the Fingerbot never reported anything and
+    # the room kept warming (23.9 -> 24.2). The retry waited until 11:05.
+    await unacknowledged(rig, "on", responded=False)
+    await walk(rig, 22.4, 22.5)
+    await rig.advance(779 - 120)
+    await rig.tick()
+    assert len(rig.presses) == 1
+    await rig.advance(1)
+    await rig.tick()
+    assert len(rig.presses) == 2
+    assert rig.record["expected"] == "on"
+
+
+async def test_no_response_on_waits_if_the_room_is_cooling(rig):
+    # A cooling room means the AC is running anyway: never press again.
+    await unacknowledged(rig, "on", responded=False)
+    await walk(rig, 22.2, 22.1)
+    await rig.advance(780)
+    await rig.tick()
+    assert len(rig.presses) == 1
+
+
+async def test_any_switch_report_disables_the_no_response_shortcut(rig):
+    await unacknowledged(rig, "on", responded=True)
+    await walk(rig, 22.4)
+    await rig.advance(780)
+    await rig.tick()
+    assert len(rig.presses) == 1
+    assert rig.record["phase"] == "pending"
+
+
+async def test_no_response_shortcut_is_not_used_for_off(rig):
+    # OFF keeps its fall-evidence rule: a silent landed OFF must not be undone.
+    await unacknowledged(rig, "off", responded=False)
+    await walk(rig, 21.2, 21.2)
+    await rig.advance(780)
+    await rig.tick()
+    assert len(rig.presses) == 1
+
+
+async def test_no_response_still_requires_cooling_demand(rig):
+    await unacknowledged(rig, "on", responded=False)
+    await rig.call("input_number", "set_value", {"entity_id": "input_number.target", "value": 26})
+    await rig.advance(780)
+    await rig.set("sensor.temperature", 22.3)
+    await rig.tick()
+    assert len(rig.presses) == 1

@@ -149,3 +149,33 @@ async def test_working_ac_falling_behind_later_is_not_second_guessed(rig):
     await report(rig, *([22.5] * 12))  # 45–105 minutes, warmer than the press.
     assert len(rig.presses) == 1
     assert rig.record["expected"] == "on"
+
+
+async def test_slow_starting_ac_is_not_read_as_off_at_thirteen_minutes(rig):
+    # 18 Oct 12:16 dining: acknowledged ON at 23.2, warmed to 23.7 by 12:25,
+    # then cooled to 23.0 by 12:40. The 12:30 re-estimate called it OFF and
+    # the 12:43 press turned the working AC off.
+    await acknowledged_on(rig, 22.3)
+    await rig.advance(240)
+    await rig.set("sensor.temperature", 22.7)
+    await rig.advance(540)
+    await rig.set("sensor.temperature", 22.8)
+    await rig.tick()  # 13 minutes: still believed ON.
+    assert rig.record["expected"] == "on"
+    await rig.advance(180)
+    await rig.set("sensor.temperature", 22.4)
+    await rig.advance(120)
+    await rig.set("sensor.temperature", 22.0)
+    await rig.tick()  # 18 minutes: cooling; never re-estimated.
+    assert rig.record["expected"] == "on"
+    assert len(rig.presses) == 1
+
+
+async def test_warming_after_seventeen_minutes_still_re_estimates_off(rig):
+    await acknowledged_on(rig, 22.3)
+    await report(rig, 22.5, 22.6, 22.7)  # 15 minutes, warming.
+    assert rig.record["expected"] == "on"
+    await rig.advance(120)
+    await rig.tick()  # 17 minutes.
+    assert rig.record["expected"] == "off"
+    assert rig.record["reason"] == "temperature"

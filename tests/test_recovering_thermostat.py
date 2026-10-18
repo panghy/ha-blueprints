@@ -198,6 +198,7 @@ async def test_invalid_journal_adopts_estimate_and_recovers_with_protection(rig,
 async def test_drift_reconciles_an_idle_incorrect_estimate(rig, initial, temperature, expected):
     await rig.install(BLUEPRINT)
     await rig.trust(initial)
+    await rig.advance(220)  # Warming re-estimate starts 17 minutes after booking.
     await rig.set("sensor.temperature", temperature)
     await rig.tick()
     assert rig.record["phase"] == "ready"
@@ -302,7 +303,7 @@ async def test_retry_then_double_delivery_can_reconcile_and_recover(rig):
     await rig.set("sensor.feedback", "01")
     await rig.set("sensor.feedback", "0500010154000300")
     await rig.set("sensor.feedback", "01")
-    await rig.advance(780)
+    await rig.advance(1020)  # Warming re-estimate starts 17 minutes after the retry.
     await rig.set("sensor.temperature", 23.2)  # Retry was booked at 22.8.
     await rig.tick()
     assert rig.record["expected"] == "off"

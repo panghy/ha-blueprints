@@ -35,6 +35,12 @@ automation:
         upper_offset: 0.4
         lower_offset: -0.1
         zha_min_off_minutes: 5
+        # Supply-vent probe (22 Oct 2026): confirms presses and flags acknowledged
+        # presses that did not change the AC. UI helpers: the baseline input_number
+        # (min -50, max 60, step 0.01) and the on/off switch for vent evidence.
+        vent_sensor: sensor.nursery_hvac_vent_sensor_temperature
+        vent_at_press: input_number.nursery_hvac_vent_at_press
+        vent_enabled: input_boolean.nursery_hvac_vent_evidence
         # Same standard recipient as the prior suspicious-late listener notice.
         # No critical push, TTS, or new recipient is introduced here.
         alert_notify_service: notify.mobile_app_clements_iphone

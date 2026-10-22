@@ -128,9 +128,10 @@ async def rig(tmp_path):
     with time_machine.travel(rig.now, tick=False) as clock:
         rig.clock = clock
         config = {
-            "input_boolean": {"cooling": {"initial": True}},
-            "input_number": {name: {"min": -10, "max": 99, "initial": value}
-                             for name, value in (("target", 21), ("snapshot", 22), ("off_snapshot", 99))},
+            "input_boolean": {"cooling": {"initial": True}, "vent_enabled": {"initial": True}},
+            "input_number": {name: {"min": lo, "max": 99, "step": 0.01, "initial": value}
+                             for name, value, lo in (("target", 21, -10), ("snapshot", 22, -10),
+                                                     ("off_snapshot", 99, -10), ("vent_base", -50, -50))},
             "input_text": {"command": {"max": 255, "initial": '{"v":1,"phase":"needs_verification"}'}},
             "input_select": {"mode": {"options": ["Cooling", "Off"], "initial": "Cooling"}},
             "timer": {"cooldown": {}, "off_cooldown": {}},

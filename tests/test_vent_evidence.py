@@ -223,3 +223,43 @@ async def test_unavailable_probe_gives_no_verdict(rig):
     await rig.set(VENT, "unavailable")
     await minutes(rig, 20, temperature=21.4)
     assert len(rig.presses) == 1 and rig.record["expected"] == "off"
+
+
+# ---------------------------------------------------------------- PR #27 review
+
+
+# Without a probe the existing 30-minute and 60-minute rules give 3 presses here; the probe
+# must not add any (before the fix it gave 5).
+@pytest.mark.parametrize("inputs,most", [(WITH_VENT, 3), (ZIGBEE, 3)])
+async def test_pending_vent_retries_are_limited_to_one_an_hour(rig, inputs, most):
+    # Review finding 1: flat probe; every press moves the Fingerbot but its report
+    # arrives after 100 s (too late for an ack), so each press stays pending.
+    rig.fail_press = True
+    await press_on(rig, inputs)
+    flips = {0: rig.presses[0][0]}
+    for i in range(int(53 * 60 / 30)):
+        await rig.advance(30)
+        await rig.set(VENT, round(21.9 + (0.01 if i % 2 else 0), 2))
+        await rig.set("sensor.temperature", 22.3)
+        for n, (when, _) in enumerate(rig.presses):
+            if n not in flips and (rig.now - when).total_seconds() >= 100:
+                flips[n] = rig.now
+                sw = rig.hass.states.get("switch.fingerbot").state
+                await rig.set("switch.fingerbot", "off" if sw == "on" else "on")
+        await rig.tick()
+    assert len(rig.presses) <= most, [p[0] for p in rig.presses]
+
+
+async def test_warm_vent_at_an_off_press_is_never_read_as_still_cooling(rig):
+    # Review finding 2: compressor idling (vent near the room) when OFF lands.
+    await press_off(rig, vent=20.0)
+    await minutes(rig, 25, vent=20.1, temperature=21.4)
+    assert len(rig.presses) == 1 and rig.record["expected"] == "off"
+
+
+async def test_cold_vent_at_an_on_press_is_never_read_as_not_cooling(rig):
+    # The AC was already running (belief wrong) when ON was pressed: a flat cold vent
+    # must not cause a second press.
+    await press_on(rig, vent=13.0)
+    await minutes(rig, 25, vent=13.0, temperature=22.3)
+    assert len(rig.presses) == 1 and rig.record["reason"] == "zigbee_ack"

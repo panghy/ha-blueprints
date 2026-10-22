@@ -35,7 +35,9 @@ blueprint:
     confirms a pending press (ON: 2.0°C colder than at the press; OFF: 1.0°C
     warmer) and flags an acknowledged press that did not change the AC (ON:
     under 0.5°C colder 6–30 minutes after the press; OFF: under 0.3°C warmer
-    10–30 minutes after it). A flagged press is retried no sooner than the
+    10–30 minutes after it), but only when the vent at the press fits the
+    assumed AC state (ON from warm, within 3.5°C of the room; OFF from cold,
+    5°C or more below it). A flagged press is retried no sooner than the
     usual floors, at most once per hour from vent evidence; a probe that has
     not reported in the last 3 minutes, or was not fresh at the press, is
     ignored. Rooms without a probe are unchanged.
@@ -477,18 +479,29 @@ actions:
            and clock - as_timestamp(states[vent_id].last_reported, 0) <= 180 }}
       vent_drop: "{{ (states(vent_base_id) | float(0) - states(vent_id) | float(0)) | round(2) if vent_ok else 0 }}"
       vent_quiet: "{{ clock - record.get('vx', 0) | float(0) > 3600 }}"
+      # The vent at the press must fit the AC state the press assumed (PR #27 review):
+      # an ON from OFF starts warm (within 3.5 °C of the room), an OFF from ON starts
+      # cold (at least 5 °C below the room). Night 2: ON 18.7-23.8 at 21.5, OFF 11.7-14.4 at 20.7.
+      vent_warm_base: "{{ vent_ok and states(vent_base_id) | float(0) >= record.t - 3.5 }}"
+      vent_cold_base: "{{ vent_ok and states(vent_base_id) | float(0) <= record.t - 5.0 }}"
+      vent_on_flat: "{{ vent_warm_base and vent_quiet and vent_drop < 0.5 }}"
+      vent_off_flat: "{{ vent_cold_base and vent_quiet and -vent_drop < 0.3 }}"
       vent_confirms: >-
         {{ vent_ok and record.phase == 'pending'
            and ((record.expected == 'on' and vent_drop >= 2.0)
              or (record.expected == 'off' and -vent_drop >= 1.0)) }}
       vent_not_cooling: >-
-        {{ vent_ok and vent_quiet and record.phase == 'ready' and record.expected == 'on' and not packet
+        {{ vent_on_flat and record.phase == 'ready' and record.expected == 'on' and not packet
            and record.get('reason') in ['zigbee_ack', 'zigbee_late_ack', 'feedback']
-           and 360 <= clock - record.issued <= 1800 and vent_drop < 0.5 }}
+           and 360 <= clock - record.issued <= 1800 }}
       vent_still_cooling: >-
-        {{ vent_ok and vent_quiet and record.phase == 'ready' and record.expected == 'off' and not packet
+        {{ vent_off_flat and record.phase == 'ready' and record.expected == 'off' and not packet
            and record.get('reason') in ['zigbee_ack', 'zigbee_late_ack', 'feedback']
-           and 600 <= clock - record.issued <= 1800 and -vent_drop < 0.3 }}
+           and 600 <= clock - record.issued <= 1800 }}
+      # A pending press the vent shows did not happen; such a retry also counts toward the hourly limit.
+      vent_pending_flat: >-
+        {{ record.phase == 'pending' and ((record.expected == 'on' and vent_on_flat)
+                                          or (record.expected == 'off' and vent_off_flat)) }}
   - variables:
       booking: >-
         {% if record.phase == 'pending' and packet
@@ -611,13 +624,13 @@ actions:
              and ((record.expected == 'on' and temperature > target + upper
                    and (((temperature - record.t) | round(1) >= 0.5 and (high - temperature) | round(1) <= 0)
                      or (no_response and (record.t - temperature) | round(1) < 0.1)
-                     or (vent_ok and vent_quiet and vent_drop < 0.5)
+                     or (vent_pending_flat and record.expected == 'on')
                      or (age >= 1800 and (record.t - temperature) | round(1) < 0.2)
                      or age >= 3600))
                or (record.expected == 'off' and temperature < target - lower
                    and (((record.t - temperature) | round(1) >= fall_evidence | float(0.6)
                          and (temperature - low) | round(1) <= 0)
-                     or (vent_ok and vent_quiet and -vent_drop < 0.3)
+                     or (vent_pending_flat and record.expected == 'off')
                      or age >= 3600))) %}
             {{ record.expected }}
           {% else %}{{ '' }}{% endif %}
@@ -645,7 +658,8 @@ actions:
             't': temperature, 'lo': temperature, 'hi': temperature, 'sw': switch_after,
             'generation': generation,
             'reason': 'retry' if record.phase == 'pending' else 'command'},
-           **({'vx': record.vx} if record.get('vx') is number else {})) | to_json }}
+           **({'vx': clock | round(0)} if vent_pending_flat
+              else {'vx': record.vx} if record.get('vx') is number else {})) | to_json }}
   # Arm the cycle timers before the physical service. The journal separately
   # enforces the full 13-minute retry/reconciliation floor for uncertain calls,
   # even when the opt-in ZHA OFF timers expire earlier. Only a matching ZHA ACK

@@ -137,6 +137,33 @@ blueprint:
     which is intended (one "go look at the AC" push per window) but does mean
     a room that genuinely flips belief state inside that window reports only
     the first direction.
+
+    HEATING — when the house mode select reads "Heating" both branches run
+    mirrored; in "Cooling" every gate and message is exactly as described
+    above, and any other mode (e.g. "Off") keeps the watchdog silent. In
+    heating the room's AC button runs the unit in HEAT, so cooling_active
+    means "the unit is on" and the failure signatures flip direction.
+    Forward (believed OFF / actually ON, a stuck-on heater): (1) temp >=
+    drift_threshold ABOVE the comfort setpoint, (2) temp at or above
+    stuck_on_heating_floor — a stuck-on heater pins the room warm, beyond
+    what an unheated Hong Kong winter room reaches on its own, (3) temp NOT
+    FALLING, and (4) the same setpoint grace. Gate (3) needs a falling
+    signal but the rooms only have "rising" Trend helpers, so it reads the
+    helper's own gradient and min_gradient attributes and passes while
+    gradient >= -min_gradient: the exact mirror of the helper's "on" test
+    (gradient > min_gradient), with no extra helper to create. A missing
+    gradient or min_gradient, or the helper reading unknown/unavailable,
+    holds the gate closed (fail-quiet, as in cooling). Setback awareness
+    carries over unchanged: a heating setback LOWERS the live target (e.g.
+    22 -> 18), so measuring gate (1) against the higher comfort snapshot is
+    again strictly harder to pass than against the live target.
+    Reverse (believed ON / actually OFF, heating not working): the room
+    sits reverse_above_target BELOW the live target, has NOT risen
+    reverse_min_drop above temp_at_toggle (a working heater adds heat; a
+    failed one leaves the room flat or falling), the gradient is not rising
+    faster than reverse_max_fall_rate, and the same grace. The margins are
+    reused as-is; they were calibrated on cooling and should be re-checked
+    against the first heating weeks.
   domain: automation
   source_url: https://github.com/panghy/ha-blueprints/blob/main/hvac_drift_watchdog.yaml
   input:
@@ -164,7 +191,9 @@ blueprint:
             - domain: input_boolean
     hvac_mode_select:
       name: HVAC Mode Selector
-      description: The input_select for house HVAC mode (must include "Cooling").
+      description: >-
+        The input_select for house HVAC mode. "Cooling" and "Heating" run the
+        matching direction; any other option keeps the watchdog silent.
       selector:
         entity:
           filter:
@@ -202,6 +231,23 @@ blueprint:
           max: 24.0
           step: 0.1
           unit_of_measurement: "°C"
+    stuck_on_heating_floor:
+      name: Stuck-On Heating Floor
+      description: >-
+        Heating mirror of stuck_on_ceiling. Absolute room temperature (°C) at
+        or above which a stuck-on heater is a plausible explanation. Over the
+        14 days to 2026-11-22 the rooms peaked at 23.3-24.9°C on their own,
+        so the default of 25.0 sits just above the natural range. A room
+        below this floor never raises a heating forward alert, however far
+        above target it sits. Raise it toward the wall units' heating
+        setpoint if sunny winter afternoons cause false alerts.
+      default: 25.0
+      selector:
+        number:
+          min: 20.0
+          max: 30.0
+          step: 0.1
+          unit_of_measurement: "°C"
     temp_trend:
       name: Temperature Rising Trend Sensor
       description: >-
@@ -219,6 +265,9 @@ blueprint:
         restart, so suppression after a restart is bounded by the
         temperature sensor's update cadence — acceptable because real
         desyncs last hours and the /5 trigger re-evaluates continuously.
+        In Heating the same sensor is read through its gradient and
+        min_gradient attributes as a "not falling" test (see the HEATING
+        section above); no second helper is needed.
       selector:
         entity:
           filter:
@@ -516,6 +565,14 @@ variables:
   room_name: !input room_name
   drift_threshold: !input drift_threshold
   stuck_on_ceiling: !input stuck_on_ceiling
+  stuck_on_heating_floor: !input stuck_on_heating_floor
+  hvac_mode_id: !input hvac_mode_select
+  # The only switch between directions. Every gate and message below keeps
+  # its original Cooling text in the non-heating branch, so Cooling renders
+  # exactly as before; modes other than Cooling/Heating never pass the
+  # mode condition.
+  heating: "{{ is_state(hvac_mode_id, 'Heating') }}"
+  mode_word: "{{ 'heating' if heating else 'cooling' }}"
   temp_trend_id: !input temp_trend
   setpoint_grace_minutes: !input setpoint_grace_minutes
   renotify_minutes: !input renotify_minutes
@@ -616,6 +673,7 @@ conditions:
     entity_id: !input hvac_mode_select
     state:
       - Cooling
+      - Heating
   # Either direction of desync may alert. The two branches are mutually
   # exclusive by construction — the forward gate needs the belief flag OFF
   # for the drift window, the reverse gate needs it ON for the reverse
@@ -632,6 +690,8 @@ conditions:
             state: "off"
             for:
               minutes: !input drift_minutes
+          # Heating mirrors gates 1-3 (room above comfort, at/above the
+          # heating floor, not falling); gate 4 is direction-agnostic.
           # ...yet the room is pinned well below the COMFORT setpoint:
           # impossible in summer without active cooling. Against the comfort
           # value rather than the live target, so an idle setback that has
@@ -640,21 +700,32 @@ conditions:
           - condition: template
             value_template: >-
               {{ temp_available and target_available
-              and current_temp <= (comfort_target - drift_threshold) }}
+              and (current_temp >= (comfort_target + drift_threshold)
+              if heating else current_temp <= (comfort_target - drift_threshold)) }}
           # ...AND the room is cold enough for a stuck-on AC to be the
           # explanation. The wall units are set to 20°C: real desyncs pin the
           # room at 18-21.5°C. A room at 23°C under a raised setpoint (e.g.
           # target 24/25) is below target but physically incompatible with a
           # stuck-on AC — never alert.
           - condition: template
-            value_template: "{{ current_temp <= stuck_on_ceiling }}"
+            value_template: >-
+              {{ current_temp >= stuck_on_heating_floor
+              if heating else current_temp <= stuck_on_ceiling }}
           # ...AND the temperature is not rising. A stuck-on AC holds the room
           # flat or falling; a merely-cool room in August drifts upward. Trend
           # sensor unknown/unavailable suppresses the alert (fail-quiet: real
           # desyncs last hours, a settled trend sensor still catches them).
-          - condition: state
-            entity_id: !input temp_trend
-            state: "off"
+          # Heating reads "not falling" off the rising helper's own numbers:
+          # gradient >= -min_gradient mirrors its "on" test. Anything missing
+          # or unknown holds the gate closed.
+          - condition: template
+            value_template: >-
+              {% if heating %}{{ states(temp_trend_id) in ['on', 'off']
+              and is_number(state_attr(temp_trend_id, 'gradient'))
+              and is_number(state_attr(temp_trend_id, 'min_gradient'))
+              and state_attr(temp_trend_id, 'gradient') | float
+              >= -(state_attr(temp_trend_id, 'min_gradient') | float | abs)
+              }}{% else %}{{ is_state(temp_trend_id, 'off') }}{% endif %}
           # ...AND the COMFORT setpoint has been unchanged for the grace
           # period — direction-agnostic: any value change (raise OR lower,
           # e.g. an away setback) arms the grace. The motivating case was a
@@ -699,8 +770,11 @@ conditions:
               minutes: !input reverse_minutes
           # ...yet the room sits clear of the ±0.3°C cycling band above
           # target (2026-09-08 nursery: +2.3°C)...
+          # Heating: clear of the band BELOW target.
           - condition: template
-            value_template: "{{ current_temp >= (target + reverse_above_target) }}"
+            value_template: >-
+              {{ current_temp <= (target - reverse_above_target)
+              if heating else current_temp >= (target + reverse_above_target) }}
           # ...AND it has not fallen from where it stood when cooling was
           # commanded, so nothing is being removed from the room. The
           # strongest single signal, though not a clean separator: at the
@@ -708,8 +782,11 @@ conditions:
           # toggle temperature while non-alerting stretches ran from 0.1°C
           # above it to 6.7°C below, so the ranges touch (study 09-04 09:35Z
           # sat 0.1 above and was held by the gate ABOVE this one, by 0.1°C).
+          # Heating: has NOT risen reverse_min_drop above the toggle temp.
           - condition: template
-            value_template: "{{ current_temp >= (toggle_temp - reverse_min_drop) }}"
+            value_template: >-
+              {{ current_temp <= (toggle_temp + reverse_min_drop)
+              if heating else current_temp >= (toggle_temp - reverse_min_drop) }}
           # ...AND the room is not visibly pulling down right now — a second,
           # independent read on the same question via the trend gradient
           # (non-alerting pull-downs fell at 0.6-6.0°C/h, the failure episodes
@@ -721,8 +798,10 @@ conditions:
           - condition: template
             value_template: >-
               {{ state_attr(temp_trend_id, 'gradient') is not none
-              and (state_attr(temp_trend_id, 'gradient') | float(0)) * 3600
-              >= -(reverse_max_fall_rate | float) }}
+              and ((state_attr(temp_trend_id, 'gradient') | float(0)) * 3600
+              <= (reverse_max_fall_rate | float) if heating
+              else (state_attr(temp_trend_id, 'gradient') | float(0)) * 3600
+              >= -(reverse_max_fall_rate | float)) }}
           # ...AND the setpoint has been stable for the same grace period the
           # forward branch uses. Right after a LOWER (nap arm, pre-cool tier)
           # the room legitimately sits above the new target with no drop yet:
@@ -772,7 +851,19 @@ actions:
               notification_id: "hvac_drift_{{ this.entity_id }}"
               title: "HVAC desync suspected: {{ room_name }}"
               message: >-
-                {{ room_name }} is {{ current_temp }}°C, {{
+                {% if heating %}{{ room_name }} is {{ current_temp }}°C, {{
+                (current_temp - comfort_target) | round(1) }}°C above the comfort
+                setpoint {{ comfort_target }}°C{{
+                ' (live target ' ~ target ~ '°C, held by an active setback)'
+                if setback_active else '' }},
+                but heating has been believed off (cooling_active off) for
+                {{ ((now() - states[cooling_active_id].last_changed).total_seconds()
+                / 60) | int }} minutes and the room is not falling (gradient
+                {{ state_attr(temp_trend_id, 'gradient') }}).
+                The AC is likely physically ON heating while HA believes it is OFF.
+                Reconcile: check the room, press the AC power if needed, and make
+                sure the cooling_active boolean matches reality.{% else %}{{
+                room_name }} is {{ current_temp }}°C, {{
                 (comfort_target - current_temp) | round(1) }}°C below the comfort
                 setpoint {{ comfort_target }}°C{{
                 ' (live target ' ~ target ~ '°C, held by an active setback)'
@@ -783,14 +874,17 @@ actions:
                 {{ state_attr(temp_trend_id, 'gradient') }}).
                 The AC is likely physically ON while HA believes it is OFF.
                 Reconcile: check the room, press the AC power if needed, and make
-                sure the cooling_active boolean matches reality.
+                sure the cooling_active boolean matches reality.{% endif %}
           - action: "{{ notify_service }}"
             data:
               title: "HVAC desync suspected: {{ room_name }}"
               message: >-
-                {{ room_name }}: {{ current_temp }}°C vs setpoint
+                {% if heating %}{{ room_name }}: {{ current_temp }}°C vs setpoint
+                {{ comfort_target }}°C with heating believed OFF and temp not
+                falling. AC probably stuck ON heating — needs a manual check.{%
+                else %}{{ room_name }}: {{ current_temp }}°C vs setpoint
                 {{ comfort_target }}°C with cooling believed OFF and temp not
-                rising. AC probably stuck ON — needs a manual check.
+                rising. AC probably stuck ON — needs a manual check.{% endif %}
               data: "{{ push_data }}"
           # Optional second phone (skipped when notify_service_2 is empty).
           - if:
@@ -801,9 +895,12 @@ actions:
                 data:
                   title: "HVAC desync suspected: {{ room_name }}"
                   message: >-
-                    {{ room_name }}: {{ current_temp }}°C vs setpoint
+                    {% if heating %}{{ room_name }}: {{ current_temp }}°C vs setpoint
+                    {{ comfort_target }}°C with heating believed OFF and temp not
+                    falling. AC probably stuck ON heating — needs a manual check.{%
+                    else %}{{ room_name }}: {{ current_temp }}°C vs setpoint
                     {{ comfort_target }}°C with cooling believed OFF and temp not
-                    rising. AC probably stuck ON — needs a manual check.
+                    rising. AC probably stuck ON — needs a manual check.{% endif %}
                   data: "{{ push_data }}"
           # Optional TTS announcement, gated on the tts_gate boolean when set.
           - if:
@@ -819,8 +916,8 @@ actions:
                   message: >-
                     Attention: possible H V A C desync in the {{ room_name }}. The
                     room is {{ current_temp }} degrees against a setpoint of
-                    {{ comfort_target }}. The AC may be stuck on and needs a
-                    manual check.
+                    {{ comfort_target }}. The AC may be stuck on{{ ' heating'
+                    if heating else '' }} and needs a manual check.
       # REVERSE BRANCH: believed ON / actually OFF.
       - conditions:
           - condition: state
@@ -830,9 +927,19 @@ actions:
           - action: persistent_notification.create
             data:
               notification_id: "hvac_reverse_drift_{{ this.entity_id }}"
-              title: "HVAC not cooling: {{ room_name }}"
+              title: "HVAC not {{ mode_word }}: {{ room_name }}"
               message: >-
-                {{ room_name }} is {{ current_temp }}°C, {{
+                {% if heating %}{{ room_name }} is {{ current_temp }}°C, {{
+                (target - current_temp) | round(1) }}°C BELOW target {{ target }}°C,
+                and has not warmed since heating (cooling_active) turned on
+                {{ ((now() - states[cooling_active_id].last_changed).total_seconds()
+                / 60) | int }} minutes ago at {{ toggle_temp }}°C
+                (trend: {{ states(temp_trend_id) }}, gradient
+                {{ state_attr(temp_trend_id, 'gradient') }}).
+                The AC is likely physically OFF while HA believes it is ON heating.
+                Reconcile: check the room, press the AC power if needed, and make
+                sure the cooling_active boolean matches reality.{% else %}{{
+                room_name }} is {{ current_temp }}°C, {{
                 (current_temp - target) | round(1) }}°C ABOVE target {{ target }}°C,
                 and has not cooled since cooling_active turned on
                 {{ ((now() - states[cooling_active_id].last_changed).total_seconds()
@@ -841,14 +948,19 @@ actions:
                 {{ state_attr(temp_trend_id, 'gradient') }}).
                 The AC is likely physically OFF while HA believes it is ON.
                 Reconcile: check the room, press the AC power if needed, and make
-                sure the cooling_active boolean matches reality.
+                sure the cooling_active boolean matches reality.{% endif %}
           - action: "{{ notify_service }}"
             data:
-              title: "HVAC not cooling: {{ room_name }}"
+              title: "HVAC not {{ mode_word }}: {{ room_name }}"
               message: >-
-                {{ room_name }}: {{ current_temp }}°C vs target {{ target }}°C with
+                {% if heating %}{{ room_name }}: {{ current_temp }}°C vs target {{
+                target }}°C with heating believed ON but the room not warming ({{
+                toggle_temp }}°C at the toggle). AC probably physically OFF — needs
+                a manual check.{% else %}{{ room_name }}: {{ current_temp }}°C vs
+                target {{ target }}°C with
                 cooling believed ON but the room not cooling ({{ toggle_temp }}°C at
-                the toggle). AC probably physically OFF — needs a manual check.
+                the toggle). AC probably physically OFF — needs a manual check.{%
+                endif %}
               data: "{{ push_data }}"
           # Optional second phone (skipped when notify_service_2 is empty).
           - if:
@@ -857,12 +969,16 @@ actions:
             then:
               - action: "{{ notify_service_2 | trim }}"
                 data:
-                  title: "HVAC not cooling: {{ room_name }}"
+                  title: "HVAC not {{ mode_word }}: {{ room_name }}"
                   message: >-
-                    {{ room_name }}: {{ current_temp }}°C vs target {{ target }}°C
+                    {% if heating %}{{ room_name }}: {{ current_temp }}°C vs target
+                    {{ target }}°C with heating believed ON but the room not
+                    warming ({{ toggle_temp }}°C at the toggle). AC probably
+                    physically OFF — needs a manual check.{% else %}{{ room_name
+                    }}: {{ current_temp }}°C vs target {{ target }}°C
                     with cooling believed ON but the room not cooling
                     ({{ toggle_temp }}°C at the toggle). AC probably physically
-                    OFF — needs a manual check.
+                    OFF — needs a manual check.{% endif %}
                   data: "{{ push_data }}"
           # Optional TTS announcement, gated on the tts_gate boolean when set.
           - if:
@@ -877,7 +993,7 @@ actions:
                   entity_id: "{{ tts_media_player | trim }}"
                   message: >-
                     Attention: the {{ room_name }} air conditioner is believed on
-                    but the room is not cooling. The room is {{ current_temp }}
+                    but the room is not {{ mode_word }}. The room is {{ current_temp }}
                     degrees against a target of {{ target }}. The unit may be
                     physically off and needs a manual check.
 

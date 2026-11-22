@@ -83,17 +83,30 @@ async def test_unacknowledged_heating_on_with_a_warming_vent_is_not_retried_by_t
     await rig.set("switch.fingerbot", "on")  # late report: the press happened
     assert rig.record["phase"] == "pending"
     await minutes(rig, 14, vent=warming_vent(COLD), temperature=COLD + 0.1)
-    assert len(rig.presses) == 1
-    assert rig.record["reason"] != "vent"
+    assert len(rig.presses) == 1 and rig.record["phase"] == "pending"
 
 
-async def test_heating_off_is_pressed_when_warm_and_a_cooling_vent_is_ignored(rig):
+async def heat_off(rig):
     await install(rig, "Heating", "on")
     await rig.set(VENT, 36.0)
     await rig.set("sensor.temperature", WARM)
     assert len(rig.presses) == 1 and rig.record["expected"] == "off"
+
+
+async def test_heating_off_is_pressed_when_warm_and_stays_off(rig):
+    await heat_off(rig)
     await minutes(rig, 25, vent=lambda i: max(WARM, 36.0 - 1.5 * i), temperature=WARM)
     assert len(rig.presses) == 1 and rig.record["expected"] == "off"
+
+
+async def test_unacknowledged_heating_off_is_not_confirmed_by_a_rising_vent(rig):
+    # Heater still running after a lost OFF: the vent keeps warming, which the
+    # cooling rule (vent 1 °C warmer) would read as a confirmed OFF.
+    rig.fail_press = True
+    await heat_off(rig)
+    rig.fail_press = False
+    await minutes(rig, 6, vent=lambda i: min(40.0, 36.0 + 0.5 * i), temperature=WARM + 0.1)
+    assert rig.record["phase"] == "pending" and rig.record["expected"] == "off"
 
 
 @pytest.mark.parametrize("mode,flagged", [("Cooling", True), ("Heating", False)])

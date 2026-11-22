@@ -308,3 +308,27 @@ async def test_vent_evidence_is_off_in_heating(rig):
         await rig.tick()
     assert len(rig.presses) == 1
     assert rig.record["expected"] == "on" and rig.record["reason"] == "zigbee_ack"
+
+
+# ---------------------------------------------------------------- Off freezes the estimate
+
+
+async def test_off_freezes_the_estimate_then_heating_starts_at_once(rig):
+    # Winter, panel off: the room cools 1.5°C over three hours. Nothing is
+    # running, so the OFF belief must not flip to ON.
+    await install(rig, "off", mode="Off")
+    await report(rig, *[round(22.0 - 1.5 * (i + 1) / 36, 2) for i in range(36)])
+    assert rig.hass.states.get("sensor.temperature").state == "20.5"
+    assert not rig.presses
+    assert belief(rig) == "off" and rig.record["expected"] == "off"
+    await rig.call("input_select", "select_option", {"entity_id": "input_select.mode", "option": "Heating"})
+    assert len(rig.presses) == 1
+    assert rig.record["expected"] == "on" and rig.record["reason"] == "zigbee_ack"
+
+
+async def test_off_keeps_an_on_belief_while_the_room_warms(rig):
+    # Cooling-direction reconciliation would call a warming room OFF.
+    await install(rig, "on", mode="Off", target=21)
+    await report(rig, *[round(22.0 + 1.5 * (i + 1) / 36, 2) for i in range(36)])
+    assert not rig.presses
+    assert belief(rig) == "on" and rig.record["expected"] == "on"

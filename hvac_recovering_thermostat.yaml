@@ -51,7 +51,9 @@ blueprint:
     "not heating" (an acknowledged ON that leaves the room colder) replaces
     "not cooling", and reconciliation adopts ON from warming while believed
     OFF and OFF from cooling while believed ON. Vent evidence is Cooling-only.
-    In Off the estimate rules keep their Cooling direction, as before.
+    In Off nothing is pressed and no temperature evidence changes the estimate
+    (natural winter cooling would otherwise flip an OFF belief to ON); only
+    press acknowledgements still book. Heating then starts on the normal rule.
 
     This is an explicitly selected availability tradeoff. Feedback has no
     command identifier; late execution, lost feedback and ambient temperature
@@ -341,6 +343,9 @@ actions:
       # around the target and Cooling renders exactly as before.
       mode: "{{ states(mode_id) }}"
       sign: "{{ -1 if mode == 'Heating' else 1 }}"
+      # In Off nothing runs, so temperature drift says nothing about the AC:
+      # every temperature-derived estimate is frozen until the mode changes.
+      thermal: "{{ mode != 'Off' }}"
   - condition: template
     value_template: >-
       {{ controller_id == this.entity_id and is_state(controller_id, 'on')
@@ -456,7 +461,7 @@ actions:
       # Acknowledged ON that never cooled: warmer than at the press, held for
       # 10 minutes, first seen 30–45 minutes after the press.
       warm_check: >-
-        {{ record.phase == 'ready' and record.expected == 'on' and not packet
+        {{ thermal and record.phase == 'ready' and record.expected == 'on' and not packet
            and record.get('reason') in ['zigbee_ack', 'zigbee_late_ack', 'feedback']
            and 1800 <= clock - record.booked <= 3300 and clock - record.issued >= 1800
            and as_timestamp(states[raw_temp_id].last_reported) > record.booked }}
@@ -494,7 +499,7 @@ actions:
       # Cooling only: the thresholds were measured on cold supply air, so in
       # Heating every vent rule is off and the room temperature alone decides.
       vent_ok: >-
-        {{ sign == 1 and vent_id is string and vent_id != '' and vent_base_id is string and vent_base_id != ''
+        {{ sign == 1 and thermal and vent_id is string and vent_id != '' and vent_base_id is string and vent_base_id != ''
            and (vent_switch_id is not string or vent_switch_id == '' or is_state(vent_switch_id, 'on'))
            and is_number(states(vent_id)) and is_number(states(vent_base_id))
            and states(vent_base_id) | float > -40
@@ -542,7 +547,7 @@ actions:
           {{ record.expected }}
         {% elif not_cooling or vent_not_cooling %}off
         {% elif vent_still_cooling %}on
-        {% elif not packet and is_state(cooldown_id, 'idle')
+        {% elif thermal and not packet and is_state(cooldown_id, 'idle')
            and clock - record.issued >= 780 and clock - record.booked >= 780 %}
           {% if record.phase == 'pending'
              and as_timestamp(states[raw_temp_id].last_reported) > record.issued %}

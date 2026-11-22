@@ -42,6 +42,17 @@ blueprint:
     not reported in the last 3 minutes, or was not fresh at the press, is
     ignored. Rooms without a probe are unchanged.
 
+    Heating (Nov 2026): the controller acts while the house mode is Cooling or
+    Heating, and never presses in Off. In Heating every temperature rule is
+    mirrored around the target: press ON below target - upper_offset and OFF
+    above target + lower_offset (with the live -0.1 lower offset the heater
+    stops 0.1°C short of the target, which leaves room for residual heat, as
+    cooling stops 0.1°C above it). Residual heating replaces residual cooling,
+    "not heating" (an acknowledged ON that leaves the room colder) replaces
+    "not cooling", and reconciliation adopts ON from warming while believed
+    OFF and OFF from cooling while believed ON. Vent evidence is Cooling-only.
+    In Off the estimate rules keep their Cooling direction, as before.
+
     This is an explicitly selected availability tradeoff. Feedback has no
     command identifier; late execution, lost feedback and ambient temperature
     changes can still produce wrong estimates or double toggles. Convergence
@@ -117,7 +128,8 @@ blueprint:
         entity:
           domain: timer
     hvac_mode_select:
-      name: House HVAC mode (Cooling)
+      name: House HVAC mode (Cooling / Heating / Off)
+      description: Presses only in Cooling or Heating; the direction follows this mode.
       selector:
         entity:
           domain: input_select
@@ -153,6 +165,7 @@ blueprint:
           domain: sensor
     upper_offset:
       name: Start above target plus this offset
+      description: In Heating, start below target minus this offset.
       default: 0.7
       selector:
         number:
@@ -175,7 +188,10 @@ blueprint:
           unit_of_measurement: min
     lower_offset:
       name: Stop below target minus this offset
-      description: Negative values stop above target to allow for temperature sampling and residual cooling.
+      description: >-
+        Negative values stop above target to allow for temperature sampling and
+        residual cooling. In Heating, stop above target plus this offset
+        (negative values stop below target, for residual heat).
       default: -0.5
       selector:
         number:
@@ -188,6 +204,7 @@ blueprint:
         An unconfirmed OFF is pressed again only once the room is still at its
         lowest point and at least this far below the command temperature.
         Keep it above the room's normal residual cooling after a real OFF.
+        In Heating: still at its highest point and this far above it (residual heat).
       default: 0.6
       selector:
         number:
@@ -319,6 +336,11 @@ actions:
       kind: "{{ trigger.id | default('evaluate') }}"
       generation: "{{ states(lifecycle_id) }}"
       activation: "{{ as_timestamp(states[controller_id].last_changed, 0) }}"
+      # Direction of every temperature rule: 1 cools (also in Off), -1 heats.
+      # Each rule compares sign × temperature, so Heating mirrors Cooling
+      # around the target and Cooling renders exactly as before.
+      mode: "{{ states(mode_id) }}"
+      sign: "{{ -1 if mode == 'Heating' else 1 }}"
   - condition: template
     value_template: >-
       {{ controller_id == this.entity_id and is_state(controller_id, 'on')
@@ -438,7 +460,7 @@ actions:
            and record.get('reason') in ['zigbee_ack', 'zigbee_late_ack', 'feedback']
            and 1800 <= clock - record.booked <= 3300 and clock - record.issued >= 1800
            and as_timestamp(states[raw_temp_id].last_reported) > record.booked }}
-      warm: "{{ (temperature - record.t) | round(1) >= 0.1 }}"
+      warm: "{{ (sign * (temperature - record.t)) | round(1) >= 0.1 }}"
       warm_since: "{{ record.get('w') | float(0) if record.phase == 'ready' else 0 }}"
   - if: >-
       {{ warm_check and ((warm and warm_since <= 0 and clock - record.booked <= 2700)
@@ -449,7 +471,7 @@ actions:
           entity_id: !input command_record
         data:
           value: "{{ dict(record, w=(clock | round(0) if warm else 0)) | to_json }}"
-      - stop: Not-cooling observation updated; reevaluate on the next reading
+      - stop: Not-cooling (or not-heating) observation updated; reevaluate on the next reading
   - variables:
       not_cooling: >-
         {{ warm_check and warm and warm_since > 0 and clock - warm_since >= 600
@@ -469,8 +491,10 @@ actions:
       # Supply-vent evidence for the current press. Only a probe that read
       # fresh at the press (base > -40, written after the journal) and has
       # reported within 3 minutes, after the press, can speak.
+      # Cooling only: the thresholds were measured on cold supply air, so in
+      # Heating every vent rule is off and the room temperature alone decides.
       vent_ok: >-
-        {{ vent_id is string and vent_id != '' and vent_base_id is string and vent_base_id != ''
+        {{ sign == 1 and vent_id is string and vent_id != '' and vent_base_id is string and vent_base_id != ''
            and (vent_switch_id is not string or vent_switch_id == '' or is_state(vent_switch_id, 'on'))
            and is_number(states(vent_id)) and is_number(states(vent_base_id))
            and states(vent_base_id) | float > -40
@@ -503,6 +527,11 @@ actions:
         {{ record.phase == 'pending' and ((record.expected == 'on' and vent_on_flat)
                                           or (record.expected == 'off' and vent_off_flat)) }}
   - variables:
+      # Post-press extremes seen from the demand side: `worst` is the peak in
+      # Cooling (low in Heating), `best` the low in Cooling (peak in Heating).
+      worst: "{{ high if sign == 1 else low }}"
+      best: "{{ low if sign == 1 else high }}"
+  - variables:
       booking: >-
         {% if record.phase == 'pending' and packet
            and record.issued <= as_timestamp(trigger.to_state.last_changed) %}
@@ -517,23 +546,24 @@ actions:
            and clock - record.issued >= 780 and clock - record.booked >= 780 %}
           {% if record.phase == 'pending'
              and as_timestamp(states[raw_temp_id].last_reported) > record.issued %}
-            {% if record.expected == 'on' and ((record.t - temperature) | round(1) >= 0.4
-                 or (high - temperature) | round(1) >= 0.4) %}on
-            {% elif record.expected == 'off' and ((temperature - record.t) | round(1) >= 0.2
-                 or (temperature - low) | round(1) >= 0.2) %}off
+            {% if record.expected == 'on' and ((sign * (record.t - temperature)) | round(1) >= 0.4
+                 or (sign * (worst - temperature)) | round(1) >= 0.4) %}on
+            {% elif record.expected == 'off' and ((sign * (temperature - record.t)) | round(1) >= 0.2
+                 or (sign * (temperature - best)) | round(1) >= 0.2) %}off
             {% else %}{{ '' }}{% endif %}
           {% elif record.phase == 'ready' %}
             {% if record.expected == 'on' and clock - record.issued >= 1020
                  and clock - record.booked >= 1020
-                 and (temperature - record.t) | round(1) >= 0.4 %}off
-            {% elif record.expected == 'off' and (record.t - temperature) | round(1) >= 1.0 %}on
+                 and (sign * (temperature - record.t)) | round(1) >= 0.4 %}off
+            {% elif record.expected == 'off' and (sign * (record.t - temperature)) | round(1) >= 1.0 %}on
             {% else %}{{ '' }}{% endif %}
           {% else %}{{ '' }}{% endif %}
         {% else %}{{ '' }}{% endif %}
   - variables:
       booking_reason: >-
         {{ 'feedback' if packet else 'zigbee_late_ack' if late_ack
-           else 'vent' if vent_confirms else 'not_cooling' if not_cooling
+           else 'vent' if vent_confirms
+           else ('not_cooling' if sign == 1 else 'not_heating') if not_cooling
            else 'vent_not_cooling' if vent_not_cooling
            else 'vent_still_cooling' if vent_still_cooling else 'temperature' }}
   - if: "{{ booking | trim in ['on', 'off'] }}"
@@ -597,7 +627,7 @@ actions:
   # Unsolicited and paired/replayed feedback never flips a ready estimate.
   - condition: template
     value_template: >-
-      {{ not packet and is_state(mode_id, 'Cooling')
+      {{ not packet and mode in ['Cooling', 'Heating'] and is_state(mode_id, mode)
          and ((transport == 'xiaomi_ble' and is_state(status_id, '01'))
            or (transport == 'zha_click' and is_state(fingerbot_mode_id, 'CLICK'))) and states(switch_id) in ['on', 'off'] }}
   - variables:
@@ -611,7 +641,7 @@ actions:
       off_wait: "{{ restart_seconds if transport == 'zha_click' and record.get('reason') == 'zigbee_ack' else 780 }}"
       # not_cooling follows 30+ minutes without cooling after the last press,
       # so the restart press needs only the normal floor from that press.
-      booked_wait: "{{ 0 if record.get('reason') in ['not_cooling', 'vent_not_cooling'] else off_wait }}"
+      booked_wait: "{{ 0 if record.get('reason') in ['not_cooling', 'not_heating', 'vent_not_cooling'] else off_wait }}"
       # Thermal (vent) reconciliation of a press keeps the 13-minute floor from that press.
       on_wait: "{{ 780 if record.get('reason') in ['estimate_adopted', 'vent', 'vent_still_cooling'] else 300 }}"
   - variables:
@@ -621,23 +651,24 @@ actions:
           {% if age >= 780 and is_state(cooldown_id, 'idle')
              and is_state(off_cooldown_id, 'idle')
              and as_timestamp(states[raw_temp_id].last_reported) > record.issued
-             and ((record.expected == 'on' and temperature > target + upper
-                   and (((temperature - record.t) | round(1) >= 0.5 and (high - temperature) | round(1) <= 0)
-                     or (no_response and (record.t - temperature) | round(1) < 0.1)
+             and ((record.expected == 'on' and sign * temperature > sign * target + upper
+                   and (((sign * (temperature - record.t)) | round(1) >= 0.5
+                         and (sign * (worst - temperature)) | round(1) <= 0)
+                     or (no_response and (sign * (record.t - temperature)) | round(1) < 0.1)
                      or (vent_pending_flat and record.expected == 'on')
-                     or (age >= 1800 and (record.t - temperature) | round(1) < 0.2)
+                     or (age >= 1800 and (sign * (record.t - temperature)) | round(1) < 0.2)
                      or age >= 3600))
-               or (record.expected == 'off' and temperature < target - lower
-                   and (((record.t - temperature) | round(1) >= fall_evidence | float(0.6)
-                         and (temperature - low) | round(1) <= 0)
+               or (record.expected == 'off' and sign * temperature < sign * target - lower
+                   and (((sign * (record.t - temperature)) | round(1) >= fall_evidence | float(0.6)
+                         and (sign * (temperature - best)) | round(1) <= 0)
                      or (vent_pending_flat and record.expected == 'off')
                      or age >= 3600))) %}
             {{ record.expected }}
           {% else %}{{ '' }}{% endif %}
-        {% elif record.expected == 'off' and temperature > target + upper
+        {% elif record.expected == 'off' and sign * temperature > sign * target + upper
            and is_state(cooldown_id, 'idle')
            and clock - record.booked >= booked_wait and clock - record.issued >= off_wait %}on
-        {% elif record.expected == 'on' and temperature < target - lower
+        {% elif record.expected == 'on' and sign * temperature < sign * target - lower
            and is_state(off_cooldown_id, 'idle')
            and clock - record.booked >= (780 if record.get('reason') == 'estimate_adopted' else 300)
            and clock - record.issued >= on_wait | int %}off
@@ -701,7 +732,7 @@ actions:
          and j.get('generation') == generation and states(lifecycle_id) == generation
          and is_state(controller_id, 'on')
          and as_timestamp(states[controller_id].last_changed) == activation
-         and is_state(mode_id, 'Cooling') and ((transport == 'xiaomi_ble' and is_state(status_id, '01'))
+         and is_state(mode_id, mode) and ((transport == 'xiaomi_ble' and is_state(status_id, '01'))
            or (transport == 'zha_click' and is_state(fingerbot_mode_id, 'CLICK')))
          and states(switch_id) in ['on', 'off']
          and is_state(cooldown_id, 'active') and is_state(off_cooldown_id, 'active')
@@ -711,8 +742,8 @@ actions:
          and is_number(states(temp_id)) and is_number(states(target_id))
          and is_number(states(raw_temp_id))
          and 0 <= as_timestamp(now()) - as_timestamp(states[raw_temp_id].last_reported, 0) <= 2100
-         and ((desired | trim == 'on' and states(temp_id) | float > states(target_id) | float + upper)
-           or (desired | trim == 'off' and states(temp_id) | float < states(target_id) | float - lower)) }}
+         and ((desired | trim == 'on' and sign * states(temp_id) | float > sign * states(target_id) | float + upper)
+           or (desired | trim == 'off' and sign * states(temp_id) | float < sign * states(target_id) | float - lower)) }}
   - variables:
       pending_before: "{{ states(journal_id) | from_json({}) }}"
   # The ZHA switch implementation awaits the cluster SUCCESS response and raises

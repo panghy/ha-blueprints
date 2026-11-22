@@ -235,13 +235,14 @@ blueprint:
       name: Stuck-On Heating Floor
       description: >-
         Heating mirror of stuck_on_ceiling. Absolute room temperature (°C) at
-        or above which a stuck-on heater is a plausible explanation. Over the
-        14 days to 2026-11-22 the rooms peaked at 23.3-24.9°C on their own,
-        so the default of 25.0 sits just above the natural range. A room
-        below this floor never raises a heating forward alert, however far
-        above target it sits. Raise it toward the wall units' heating
-        setpoint if sunny winter afternoons cause false alerts.
-      default: 25.0
+        or above which a stuck-on heater is a plausible explanation. It must
+        sit above the room's natural afternoon peak with the AC off: the
+        study reached 24.9°C with the AC off on 2026-11-18 (the dining
+        room's 24.5 peaks that fortnight were the cooling cap, not a natural
+        peak), so the default is 26.0. A room below this floor never raises
+        a heating forward alert, however far above target it sits. Recheck
+        it against each room's afternoon peaks after the first heating week.
+      default: 26.0
       selector:
         number:
           min: 20.0

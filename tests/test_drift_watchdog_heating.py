@@ -88,28 +88,29 @@ def titles(calls):
 # --- Heating forward: believed OFF, heater stuck on --------------------------
 
 async def test_heating_stuck_on_heater_alerts_every_wired_output(rig):
-    calls = await watchdog(rig, "Heating", "off", 25.5)
+    calls = await watchdog(rig, "Heating", "off", 26.5)
     await check(rig)
     assert [name for name, _ in calls] == [
         "persistent_notification.create", "notify.test", "notify.second", "tts.cloud_say"]
     assert set(titles(calls)) == {"HVAC desync suspected: Study"}
     persistent = calls.of("persistent_notification.create")[0]["message"]
     assert persistent.startswith(
-        "Study is 25.5°C, 3.5°C above the comfort setpoint 22.0°C, but heating has been "
+        "Study is 26.5°C, 4.5°C above the comfort setpoint 22.0°C, but heating has been "
         "believed off (cooling_active off) for 46 minutes and the room is not falling")
     assert "physically ON heating" in persistent
-    phone = ("Study: 25.5°C vs setpoint 22.0°C with heating believed OFF and temp not "
+    phone = ("Study: 26.5°C vs setpoint 22.0°C with heating believed OFF and temp not "
              "falling. AC probably stuck ON heating — needs a manual check.")
     assert calls.of("notify.test")[0]["message"] == phone
     assert calls.of("notify.second")[0]["message"] == phone
     assert "stuck on heating" in calls.of("tts.cloud_say")[0]["message"]
 
 
-@pytest.mark.parametrize("temp", [24.9, 25.0])
+@pytest.mark.parametrize("temp", [24.9, 25.9, 26.0])
 async def test_heating_floor_gate(rig, temp):
+    # 24.9: the study's natural peak with the AC off (18 Nov).
     calls = await watchdog(rig, "Heating", "off", temp)
     await check(rig)
-    assert bool(calls) == (temp >= 25.0)
+    assert bool(calls) == (temp >= 26.0)
 
 
 @pytest.mark.parametrize("temp", [22.9, 23.0])
@@ -128,27 +129,27 @@ async def test_heating_drift_threshold_is_above_target(rig, temp):
     (None, False),         # Gradient missing: fail-quiet.
 ])
 async def test_heating_not_falling_gate(rig, gradient, alerts):
-    calls = await watchdog(rig, "Heating", "off", 25.5, gradient=gradient)
+    calls = await watchdog(rig, "Heating", "off", 26.5, gradient=gradient)
     await check(rig)
     assert bool(calls) == alerts
 
 
 @pytest.mark.parametrize("state", ["unknown", "unavailable"])
 async def test_heating_trend_unreadable_is_quiet(rig, state):
-    calls = await watchdog(rig, "Heating", "off", 25.5, trend=state)
+    calls = await watchdog(rig, "Heating", "off", 26.5, trend=state)
     await check(rig)
     assert not calls
 
 
 async def test_heating_missing_min_gradient_is_quiet(rig):
-    calls = await watchdog(rig, "Heating", "off", 25.5)
+    calls = await watchdog(rig, "Heating", "off", 26.5)
     rig.hass.states.async_set(TREND, "off", {"gradient": FLAT})
     await check(rig)
     assert not calls
 
 
 async def test_heating_setpoint_grace_defers_the_alert(rig):
-    calls = await watchdog(rig, "Heating", "off", 25.5)
+    calls = await watchdog(rig, "Heating", "off", 26.5)
     await rig.call("input_number", "set_value", {"entity_id": "input_number.target", "value": 21})
     await rig.advance(44 * 60)
     await check(rig)
@@ -159,7 +160,7 @@ async def test_heating_setpoint_grace_defers_the_alert(rig):
 
 
 async def test_heating_believed_off_for_too_short_is_quiet(rig):
-    calls = await watchdog(rig, "Heating", "off", 25.5)
+    calls = await watchdog(rig, "Heating", "off", 26.5)
     await rig.call("input_boolean", "turn_on", {"entity_id": "input_boolean.cooling"})
     await rig.advance(60)
     await rig.call("input_boolean", "turn_off", {"entity_id": "input_boolean.cooling"})
@@ -192,7 +193,7 @@ async def test_heating_setback_live_target_without_wiring(rig):
 
 
 async def test_heating_setback_churn_does_not_rearm_the_grace(rig):
-    calls = await watchdog(rig, "Heating", "off", 25.5, setback=("off", 22), **SETBACK)
+    calls = await watchdog(rig, "Heating", "off", 26.5, setback=("off", 22), **SETBACK)
     # The idle setback engages: marker on and target 22 -> 18 in one step;
     # the snapshot is a same-value write, so its last_changed stays old.
     await rig.set("input_boolean.setback", "on")
@@ -200,12 +201,12 @@ async def test_heating_setback_churn_does_not_rearm_the_grace(rig):
     await rig.advance(5 * 60)
     await check(rig)
     persistent = calls.of("persistent_notification.create")[0]["message"]
-    assert persistent.startswith("Study is 25.5°C, 3.5°C above the comfort setpoint 22.0°C "
+    assert persistent.startswith("Study is 26.5°C, 4.5°C above the comfort setpoint 22.0°C "
                                  "(live target 18.0°C, held by an active setback)")
 
 
 async def test_heating_independent_target_change_still_arms_the_grace(rig):
-    calls = await watchdog(rig, "Heating", "off", 25.5, setback=("off", 22), **SETBACK)
+    calls = await watchdog(rig, "Heating", "off", 26.5, setback=("off", 22), **SETBACK)
     await rig.call("input_number", "set_value", {"entity_id": "input_number.target", "value": 21})
     await rig.advance(5 * 60)
     await check(rig)
@@ -255,6 +256,14 @@ async def test_heating_reverse_rising_rate_gate(rig, per_hour, alerts):
     calls = await watchdog(rig, "Heating", "on", 20.0, toggle=20.0, gradient=per_hour / 3600)
     await check(rig)
     assert bool(calls) == alerts
+
+
+async def test_heating_reverse_missing_gradient_is_quiet(rig):
+    # A missing gradient would read as 0°C/h, i.e. "not rising": the guard
+    # must hold the heating reverse branch quiet instead.
+    calls = await watchdog(rig, "Heating", "on", 20.0, toggle=20.0, gradient=None)
+    await check(rig)
+    assert not calls
 
 
 async def test_heating_reverse_ignores_the_cooling_signature(rig):
@@ -366,7 +375,7 @@ async def test_cooling_setback_message_is_unchanged(rig):
     (21.1, FLAT, False),
     (21.6, FLAT, False),     # Above the stuck-on ceiling (target raised).
     (20.5, 0.0002, False),   # Rising.
-    (25.5, FLAT, False),     # Heating's stuck-on signature.
+    (26.5, FLAT, False),     # Heating's stuck-on signature.
 ])
 async def test_cooling_forward_gates_are_unchanged(rig, temp, gradient, alerts):
     target = 22.7 if temp == 21.6 else 22

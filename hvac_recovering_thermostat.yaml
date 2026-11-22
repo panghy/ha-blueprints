@@ -53,7 +53,10 @@ blueprint:
     OFF and OFF from cooling while believed ON. Vent evidence is Cooling-only.
     In Off nothing is pressed and no temperature evidence changes the estimate
     (natural winter cooling would otherwise flip an OFF belief to ON); only
-    press acknowledgements still book. Heating then starts on the normal rule.
+    press acknowledgements still book. The journal records the mode its
+    temperature baseline was taken in (`m`, absent for Cooling); on the first
+    run after any mode change the baseline moves to the current reading with
+    no estimate booked, so the new mode starts on its normal ON/OFF rules.
 
     This is an explicitly selected availability tradeoff. Feedback has no
     command identifier; late execution, lost feedback and ambient temperature
@@ -346,6 +349,11 @@ actions:
       # In Off nothing runs, so temperature drift says nothing about the AC:
       # every temperature-derived estimate is frozen until the mode changes.
       thermal: "{{ mode != 'Off' }}"
+      # The mode the journal's baseline belongs to; absent means Cooling, so
+      # Cooling-only journals are unchanged. Other select states keep the last.
+      mode_tag: >-
+        {{ mode if mode in ['Cooling', 'Heating', 'Off']
+           else record.get('m', 'Cooling') if record is mapping else 'Cooling' }}
   - condition: template
     value_template: >-
       {{ controller_id == this.entity_id and is_state(controller_id, 'on')
@@ -377,13 +385,14 @@ actions:
           entity_id: !input command_record
         data:
           value: >-
-            {{ {'v': 2, 'phase': 'pending' if record.phase == 'pending' else 'ready',
+            {{ dict({'v': 2, 'phase': 'pending' if record.phase == 'pending' else 'ready',
                 'expected': record.expected, 'issued': record.issued, 'booked': record.booked,
                 't': (states(off_snapshot_id) | float(temperature)
                        if record.phase == 'pending' and record.expected == 'off'
                        else temperature if record.phase == 'pending'
                        else states(snapshot_id) | float),
-                'generation': generation, 'reason': 'migration'} | to_json }}
+                'generation': generation, 'reason': 'migration'},
+                **({'m': mode_tag} if mode_tag != 'Cooling' else {})) | to_json }}
       - stop: Previous command carried forward; no actuation during migration
   - variables:
       valid: >-
@@ -418,10 +427,11 @@ actions:
           entity_id: !input command_record
         data:
           value: >-
-            {{ {'v': 2, 'phase': 'ready', 'expected': states(belief_id),
+            {{ dict({'v': 2, 'phase': 'ready', 'expected': states(belief_id),
                 'issued': clock, 'booked': clock,
                 't': states(snapshot_id) | float, 'generation': generation,
-                'reason': 'estimate_adopted'} | to_json }}
+                'reason': 'estimate_adopted'},
+                **({'m': mode_tag} if mode_tag != 'Cooling' else {})) | to_json }}
       - stop: Estimate adopted; normal protection interval applies
   # Preserve an outstanding command and its original age across reloads.
   # This marker protects yielding runs; it is not a human-reset requirement.
@@ -433,6 +443,21 @@ actions:
         data:
           value: "{{ dict(record, generation=generation) | to_json }}"
       - stop: Lifecycle updated; reevaluate automatically
+  # First run after a mode change: the old baseline was taken under another
+  # direction (or in Off, while nothing ran). Move it to the current reading
+  # without booking an estimate; the normal rules then apply in this run.
+  - if: "{{ record.get('m', 'Cooling') != mode_tag }}"
+    then:
+      - action: input_text.set_value
+        target:
+          entity_id: !input command_record
+        data:
+          value: >-
+            {{ dict(record, t=temperature, m=mode_tag,
+                    **(dict({'lo': temperature, 'hi': temperature} if record.phase == 'pending' else {},
+                            **({'w': 0} if 'w' in record else {})))) | to_json }}
+      - variables:
+          record: "{{ states(journal_id) | from_json({}) }}"
   # Track the post-command temperature extremes of an unconfirmed press. Retry
   # and confirmation compare against them, not only the command temperature.
   - variables:
@@ -627,7 +652,9 @@ actions:
             {{ dict({'v': 2, 'phase': 'ready', 'expected': booking | trim,
                 'issued': record.issued, 'booked': as_timestamp(now()),
                 't': temperature, 'generation': generation,
-                'reason': booking_reason}, **({'vx': vx} if vx is number else {})) | to_json }}
+                'reason': booking_reason},
+                **(dict({'vx': vx} if vx is number else {},
+                        **({'m': mode_tag} if mode_tag != 'Cooling' else {})))) | to_json }}
       - stop: Estimate updated; never actuate in a feedback booking
   # Unsolicited and paired/replayed feedback never flips a ready estimate.
   - condition: template
@@ -694,8 +721,9 @@ actions:
             't': temperature, 'lo': temperature, 'hi': temperature, 'sw': switch_after,
             'generation': generation,
             'reason': 'retry' if record.phase == 'pending' else 'command'},
-           **({'vx': clock | round(0)} if vent_pending_flat
-              else {'vx': record.vx} if record.get('vx') is number else {})) | to_json }}
+           **(dict({'vx': clock | round(0)} if vent_pending_flat
+              else {'vx': record.vx} if record.get('vx') is number else {},
+              **({'m': mode_tag} if mode_tag != 'Cooling' else {})))) | to_json }}
   # Arm the cycle timers before the physical service. The journal separately
   # enforces the full 13-minute retry/reconciliation floor for uncertain calls,
   # even when the opt-in ZHA OFF timers expire earlier. Only a matching ZHA ACK

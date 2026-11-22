@@ -332,3 +332,73 @@ async def test_off_keeps_an_on_belief_while_the_room_warms(rig):
     await report(rig, *[round(22.0 + 1.5 * (i + 1) / 36, 2) for i in range(36)])
     assert not rig.presses
     assert belief(rig) == "on" and rig.record["expected"] == "on"
+
+
+# ---------------------------------------------------------------- mode changes move the baseline (PR #29 review)
+
+
+async def select(rig, mode):
+    await rig.call("input_select", "select_option", {"entity_id": "input_select.mode", "option": mode})
+
+
+async def test_off_to_heating_after_warming_still_heats_a_cold_room(rig):
+    # Live 22 Nov: every room believed OFF with a baseline 1.5-3°C below the room.
+    await install(rig, "off", mode="Off", target=24.5)  # heating ON below 23.8
+    await report(rig, 22.6, 23.2)
+    assert not rig.presses
+    await select(rig, "Heating")
+    assert len(rig.presses) == 1
+    assert rig.record["expected"] == "on" and rig.record["reason"] == "zigbee_ack"
+    assert rig.record["m"] == "Heating"
+
+
+async def test_off_to_cooling_after_cooling_keeps_the_unit_off(rig):
+    await install(rig, "off", mode="Off", target=24)
+    await report(rig, 21.5, 20.9)
+    await select(rig, "Cooling")
+    await report(rig, *([20.9] * 6))
+    assert not rig.presses
+    assert belief(rig) == "off" and rig.record["expected"] == "off"
+
+
+async def test_cooling_to_heating_keeps_an_on_belief(rig):
+    # A running unit, cooled 0.4°C below its Cooling baseline, keeps running
+    # (now heating); it must not be re-estimated OFF and toggled off.
+    await install(rig, "on", mode="Cooling", target=21)
+    await rig.set("sensor.temperature", 21.6)
+    await rig.advance(1200)
+    await rig.set("select.fingerbot_mode", "SWITCH")  # hold presses across the target change
+    await rig.call("input_number", "set_value", {"entity_id": "input_number.target", "value": 23})
+    await select(rig, "Heating")
+    assert rig.record["expected"] == "on" and belief(rig) == "on"
+    await rig.set("select.fingerbot_mode", "CLICK")
+    await report(rig, *([21.6] * 4))
+    assert not rig.presses
+    assert rig.record["expected"] == "on"
+
+
+async def test_cooling_heating_cooling_round_trip(rig):
+    await install(rig, "off", mode="Cooling", target=21)
+    await rig.set("sensor.temperature", 22.3)
+    assert len(rig.presses) == 1 and rig.record["expected"] == "on"
+    await report(rig, 21.4)
+    assert len(rig.presses) == 2 and rig.record["expected"] == "off"
+    assert "m" not in rig.record
+
+    await rig.advance(780)
+    await rig.call("input_number", "set_value", {"entity_id": "input_number.target", "value": 23})
+    await select(rig, "Heating")
+    await rig.tick()
+    assert len(rig.presses) == 3 and rig.record["expected"] == "on"
+    assert rig.record["m"] == "Heating"
+    await report(rig, 22.6)
+    assert len(rig.presses) == 4 and rig.record["expected"] == "off"
+
+    await rig.advance(780)
+    await rig.call("input_number", "set_value", {"entity_id": "input_number.target", "value": 21})
+    await select(rig, "Cooling")
+    await rig.tick()
+    assert len(rig.presses) == 5 and rig.record["expected"] == "on"
+    assert "m" not in rig.record
+    assert rig.record["reason"] == "zigbee_ack"
+    assert belief(rig) == "on"
